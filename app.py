@@ -18,20 +18,14 @@ def get_image_base64(path):
         return None
 
 def limpar_registro(reg):
-    """Garante que o registro seja lido corretamente com 13 dígitos, sem problemas de float do Excel"""
+    """Garante que o registro seja lido corretamente com 13 dígitos"""
     if pd.isna(reg) or str(reg).strip().upper() in ['NAN', 'NONE', '']: 
         return ""
-    
-    # Se o Pandas leu a coluna como número, converte para inteiro para matar notação científica
     if isinstance(reg, (float, int)):
         return str(int(reg))
-        
     s = str(reg).strip()
-    # Remove '.0' no final caso tenha virado string antes
     if s.endswith('.0'): 
         s = s[:-2]
-        
-    # Remove qualquer caractere que não seja número
     return re.sub(r'[^0-9]', '', s)
 
 # --- ESTADOS DO SISTEMA ---
@@ -44,11 +38,15 @@ def resetar_app():
         if key in st.session_state: del st.session_state[key]
 
 # --- MOTOR LÓGICO DE QUANTIDADES ---
-def extrair_qtd_cmed(apres):
-    apres = str(apres).upper()
+def extrair_qtd_cmed(apres_cmed, desc_proposta):
+    apres = str(apres_cmed).upper()
+    desc = str(desc_proposta).upper()
     
-    # 1. Blindagem Total para Respiratórios, Sprays e Doses (Sempre Unitário/Divisor 1)
-    if re.search(r'\b(DOS[A-Z]*|ACIONAMENTO[A-Z]*|JATO[A-Z]*|AER[A-Z]*|SPRAY|INALA[A-Z]*|PULVERIZA[A-Z]*)\b', apres):
+    # 1. Blindagem Total para Respiratórios, Sprays e Doses (Olha a CMED e a Proposta)
+    # Usa \b para garantir que "DOSES" ou "DOSE" seja pego, mas ignore palavras como "DOSAGEM"
+    padrao_dose = r'\b(DOSES?|AEROSSOL|AEROSOL|AER\b|SPRAY|JATOS?|ACIONAMENTOS?|INALADOR|PULVERIZA[A-Z]*)\b'
+    
+    if re.search(padrao_dose, apres) or re.search(padrao_dose, desc):
         return 1
     
     # Unidades que não representam multiplicador de caixas
@@ -59,22 +57,21 @@ def extrair_qtd_cmed(apres):
     if m: 
         return float(m.group(1)) * float(m.group(2))
     
-    # 3. Busca embalagens físicas ANTES da unidade (ex: "50 AMP X 2 ML" -> 50)
-    m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|TB|BS|CJ|BOLS|CARP|TUB|BOMBA|CANETA|SVD|CX|CT|BL|ENV|STRIP|CPR|CAP|UN)\b', apres)
+    # 3. Busca embalagens físicas ANTES da unidade (ex: "500 CPR" -> 500)
+    m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|TB|BS|CJ|BOLS|CARP|TUB|BOMBA|CANETA|SVD|CX|CT|BL|ENV|STRIP|CPR|COMP?|CPRS|CAP|UN)\b', apres)
     if m:
         return float(m.group(1))
     
-    # 4. Busca padrão "X Quantidade" (ex: "X 28")
+    # 4. Busca padrão "X Quantidade" (ex: "X 500")
     m = re.search(rf'X\s+(\d+)\b(?!\s*{unidades_ignoradas})', apres)
     if m: 
         return float(m.group(1))
     
-    # 5. Busca padrão "Contém/Com" (ex: "CT C/ 500")
+    # 5. Busca padrão "Contém/Com" (ex: "CT C/ 500" ou "COM 500")
     m = re.search(r'(?:C/|CT|CX|COM|CONTEM)\s*(\d+)\b', apres)
     if m: 
         return float(m.group(1))
     
-    # Se nada bater, considera que é unitário (1)
     return 1
 
 def formatar_moeda(val):
@@ -125,7 +122,6 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         c_vlr = [c for c in df_prop.columns if 'VLR' in str(c).upper() and 'UNIT' in str(c).upper()][0]
         c_item = [c for c in df_prop.columns if 'ITEM' in str(c).upper()][0]
 
-        # APLICANDO A NOVA LIMPEZA DE REGISTROS AQUI:
         df_prop['Reg_L'] = df_prop[c_reg].apply(limpar_registro)
         df_cmed['Reg_C'] = df_cmed['REGISTRO'].apply(limpar_registro)
         
@@ -135,7 +131,8 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         df_m = pd.merge(df_prop, df_cmed[['Reg_C', coluna_icms, c_apres_cmed]], left_on='Reg_L', right_on='Reg_C', how='left')
         df_m['PF_Num'] = df_m[coluna_icms].apply(formatar_moeda)
         
-        df_m['Divisor'] = df_m[c_apres_cmed].apply(extrair_qtd_cmed)
+        # Envia tanto a apresentação CMED quanto a Descrição da Proposta para avaliar Doses/Sprays
+        df_m['Divisor'] = df_m.apply(lambda row: extrair_qtd_cmed(row[c_apres_cmed], row[c_desc]), axis=1)
         df_m['Teto_U'] = df_m['PF_Num'] / df_m['Divisor']
 
         df_precos = df_m[(df_m['V_Unit'] > (df_m['Teto_U'] + 0.0005)) & (df_m['Teto_U'] > 0)].copy()
@@ -184,8 +181,8 @@ else:
         if df_p.empty: 
             st.success("Tudo OK! Nenhum item com preço abusivo.")
         else:
-            # AVISO SOBRE O DOWNLOAD EM CSV vs EXCEL
-            st.info("💡 **Dica de Exportação:** O pequeno ícone que aparece no canto da tabela abaixo faz o download apenas em `.csv` (padrão da ferramenta). Para baixar a planilha formatada em **Excel**, role um pouco a tela e clique no botão azul gigante **'📥 Baixar Auditoria Completa (Excel)'**.")
+            # AVISO IMPORTANTE PARA A EQUIPE
+            st.info("💡 **Atenção:** O pequeno ícone cinza que aparece no canto da tabela abaixo é um padrão do sistema que baixa o arquivo desconfigurado em CSV. Para extrair a tabela perfeita em Excel, role a tela e clique no botão azul gigante **'📥 Baixar Auditoria Completa (Excel)'**.")
             
             exib_p = df_p[['Col_Item', 'Col_Desc', 'V_Unit', 'PF_Num', 'Divisor', 'Teto_U', 'Diferenca']].copy()
             exib_p.columns = ['Item', 'Descrição', 'Valor Proposta', 'PF CMED', 'Divisor', 'Teto Unit.', 'Diferença']
@@ -205,7 +202,7 @@ else:
         if not df_r.empty:
             st.dataframe(df_r[['Col_Item', 'Col_Desc', 'Col_Reg']], use_container_width=True)
         
-        # DOWNLOAD EXCEL
+        # O VERDADEIRO BOTÃO DE EXCEL (XLSX)
         st.download_button("📥 Baixar Auditoria Completa (Excel)", exportar_excel(df_p, df_r), "Auditoria_Drogafonte.xlsx", use_container_width=True)
 
         # GERADOR DE PDF
