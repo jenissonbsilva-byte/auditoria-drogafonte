@@ -12,11 +12,10 @@ def limpar_registro(reg):
     return re.sub(r'\D', '', str(reg))
 
 def buscar_cabecalho(df, colunas_alvo):
-    """Varre as linhas para encontrar onde os dados reais começam"""
     for i, row in df.iterrows():
-        row_str = row.astype(str).tolist()
-        # Converte para maiúsculo para evitar erros de case (Maiúsculo/Minúsculo)
-        if any(col.upper() in [s.upper().strip() for s in row_str] for col in colunas_alvo):
+        # Blindagem: Força tudo a virar texto (str) antes de aplicar maiúsculo (.upper())
+        row_str = [str(val).upper().strip() for val in row.tolist()]
+        if any(str(col).upper() in row_str for col in colunas_alvo):
             return i
     return None
 
@@ -24,38 +23,35 @@ def buscar_cabecalho(df, colunas_alvo):
 @st.cache_data
 def carregar_cmed():
     if os.path.exists('cmed_atual.xlsx'):
-        # Lê primeiro sem cabeçalho para achar a linha correta
         df_raw = pd.read_excel('cmed_atual.xlsx', header=None)
-        
-        # Busca onde está a coluna REGISTRO na CMED (pula os textos da Anvisa)
         idx_cabecalho = buscar_cabecalho(df_raw, ['REGISTRO', 'CÓDIGO GGREM', 'SUBSTÂNCIA'])
         
         if idx_cabecalho is not None:
             df = pd.read_excel('cmed_atual.xlsx', skiprows=idx_cabecalho)
         else:
-            df = pd.read_excel('cmed_atual.xlsx') # Fallback
+            df = pd.read_excel('cmed_atual.xlsx')
             
-        # Padronização Inteligente da CMED
+        # Limpa os espaços em branco de todas as colunas para facilitar a busca
+        df.columns = [str(c).strip() for c in df.columns]
+            
+        # Padronização de Colunas Base
         colunas_cmed = {
             'REGISTRO': ['REGISTRO', 'Registro', 'Nº REGISTRO', 'REGISTRO MS', 'No REGISTRO'],
-            'PF 20,5%': ['PF 20,5%', 'PF 20,5% (PE)', 'PF 20,5', 'PREÇO FÁBRICA 20,5%'],
             'APRESENTAÇÃO': ['APRESENTAÇÃO', 'Apresentação', 'APRESENTACAO', 'DESCRICAO_CMED']
         }
         
         for oficial, variantes in colunas_cmed.items():
             for v in variantes:
-                colunas_existentes = [str(c).strip() for c in df.columns]
-                if v in colunas_existentes:
-                    idx = colunas_existentes.index(v)
+                if v in df.columns:
+                    idx = list(df.columns).index(v)
                     df.rename(columns={df.columns[idx]: oficial}, inplace=True)
                     break
         return df
     else:
         return None
 
-def processar_dados(file_proposta, df_cmed):
+def processar_dados(file_proposta, df_cmed, coluna_icms):
     try:
-        # Pula as linhas de cabeçalho da Drogafonte
         df_raw = pd.read_excel(file_proposta, header=None)
         idx_cabecalho = buscar_cabecalho(df_raw, ['Reg.M.S', 'Registro MS', 'REG. MS', 'Registro'])
         
@@ -64,7 +60,6 @@ def processar_dados(file_proposta, df_cmed):
 
         df_prop = pd.read_excel(file_proposta, skiprows=idx_cabecalho)
         
-        # Padronização da Proposta
         colunas_prop = {
             'Reg.M.S': ['Reg.M.S', 'REG. MS', 'Registro MS', 'Registro'],
             'Vlr. Unit.': ['Vlr. Unit.', 'Valor Unitário', 'Preço Unit.', 'Unitário', 'Vlr.Unit'],
@@ -78,17 +73,19 @@ def processar_dados(file_proposta, df_cmed):
                     break
 
         if 'Reg.M.S' not in df_prop.columns or 'Vlr. Unit.' not in df_prop.columns:
-            return None, f"Colunas da proposta não identificadas. Verifique o arquivo."
+            return None, f"Colunas essenciais da proposta não identificadas."
         
         if 'REGISTRO' not in df_cmed.columns:
             return None, "Coluna de Registro não encontrada na CMED."
 
-        # Limpeza para o Cruzamento
+        # Verifica se a coluna de ICMS escolhida existe na CMED
+        if coluna_icms not in df_cmed.columns:
+            return None, f"A coluna '{coluna_icms}' não foi encontrada na tabela CMED."
+
         df_prop['REG_LIMPO'] = df_prop['Reg.M.S'].apply(limpar_registro)
         df_cmed_copy = df_cmed.copy()
         df_cmed_copy['REG_LIMPO'] = df_cmed_copy['REGISTRO'].apply(limpar_registro)
         
-        # Cruzamento (Merge)
         resultado = pd.merge(df_prop, df_cmed_copy, on='REG_LIMPO', how='inner')
         
         def calcular_teto(row):
@@ -98,13 +95,12 @@ def processar_dados(file_proposta, df_cmed):
             else:
                 match = re.search(r'(\d+)\s*(?:COMP|CAP|DRG|ENV|FR|AMP|SER|TAB|UNID|UN)', apres)
                 qtd = int(match.group(1)) if match else 1
-            # Converte valores com vírgula para ponto (se for string) e depois para float
-            pf = str(row['PF 20,5%']).replace(',', '.') if isinstance(row['PF 20,5%'], str) else row['PF 20,5%']
+                
+            pf = str(row[coluna_icms]).replace(',', '.') if isinstance(row[coluna_icms], str) else row[coluna_icms]
             return float(pf) / qtd
 
         resultado['Teto_Unitario'] = resultado.apply(calcular_teto, axis=1)
         
-        # Tratamento da coluna de Valor Unitário da Proposta
         resultado['Vlr. Unit.'] = resultado['Vlr. Unit.'].apply(
             lambda x: float(str(x).replace(',', '.')) if isinstance(x, str) else x
         )
@@ -128,6 +124,25 @@ with st.sidebar:
     else:
         st.image("https://drogafonte.com.br/wp-content/uploads/2021/10/logo-drogafonte.png", width=200)
     
+    st.header("Configurações")
+    
+    opcoes_icms = {
+        "PF 12%": "PF 12%",
+        "PF 17%": "PF 17%",
+        "PF 17,5%": "PF 17,5%",
+        "PF 18%": "PF 18%",
+        "PF 19%": "PF 19%",
+        "PF 19,5%": "PF 19,5%",
+        "PF 20%": "PF 20%",
+        "PF 20,5% (Pernambuco)": "PF 20,5%",
+        "PF 21%": "PF 21%",
+        "PF 22%": "PF 22%"
+    }
+    
+    escolha_icms = st.selectbox("Selecione a Alíquota ICMS (Destino):", list(opcoes_icms.keys()), index=7)
+    coluna_icms_real = opcoes_icms[escolha_icms]
+
+    st.markdown("---")
     st.header("Status do Sistema")
     if df_cmed is not None:
         st.success("✅ Base CMED Ativa")
@@ -138,19 +153,23 @@ if df_cmed is not None:
     upload_prop = st.file_uploader("Arraste a Proposta (Excel) aqui", type=['xls', 'xlsx'])
 
     if upload_prop:
-        with st.spinner("Analisando proposta..."):
-            dados_finais, erro = processar_dados(upload_prop, df_cmed)
+        with st.spinner(f"Analisando proposta com base no {escolha_icms}..."):
+            dados_finais, erro = processar_dados(upload_prop, df_cmed, coluna_icms_real)
             
             if erro:
                 st.error(erro)
             elif dados_finais.empty:
-                st.success("✅ Tudo certo! Nenhum item acima da CMED.")
+                st.success(f"✅ Tudo certo! Nenhum item acima da CMED para a alíquota {escolha_icms}.")
             else:
-                st.warning(f"🚨 {len(dados_finais)} itens com valor acima do permitido!")
+                st.warning(f"🚨 {len(dados_finais)} itens com valor acima do teto ({escolha_icms})!")
                 
                 exibicao = dados_finais[['Descrição', 'Reg.M.S', 'Vlr. Unit.', 'Teto_Unitario']].copy()
-                exibicao.columns = ['Item', 'Registro MS', 'Preço Proposta', 'Preço Teto CMED']
-                st.dataframe(exibicao.style.format({'Preço Proposta': 'R$ {:.4f}', 'Preço Teto CMED': 'R$ {:.4f}'}))
+                exibicao.columns = ['Item', 'Registro MS', 'Preço Proposta', f'Teto CMED ({escolha_icms})']
+                
+                st.dataframe(exibicao.style.format({
+                    'Preço Proposta': 'R$ {:.4f}', 
+                    f'Teto CMED ({escolha_icms})': 'R$ {:.4f}'
+                }))
 
                 if st.button("📥 Baixar Relatório em PDF"):
                     pdf = FPDF()
@@ -158,7 +177,7 @@ if df_cmed is not None:
                     pdf.set_font("Arial", 'B', 14)
                     pdf.cell(190, 10, "DROGAFONTE - RELATORIO DE AUDITORIA CMED", 0, 1, 'C')
                     pdf.set_font("Arial", '', 9)
-                    pdf.cell(190, 7, f"Arquivo: {upload_prop.name}", 0, 1, 'C')
+                    pdf.cell(190, 7, f"Arquivo: {upload_prop.name} | Aliquota: {escolha_icms}", 0, 1, 'C')
                     pdf.ln(5)
                     
                     pdf.set_font("Arial", 'B', 8)
