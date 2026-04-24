@@ -29,25 +29,35 @@ def resetar_app():
 # --- MOTORES LÓGICOS ---
 def extrair_qtd_cmed(apres):
     apres = str(apres).upper()
-    # REGRA: Se for DOSE, o divisor é 1 (Unitário)
+    
+    # 1. REGRA: Se for DOSE, o divisor é 1 (Unitário)
     if "DOS" in apres or "DOSE" in apres: 
         return 1
     
-    # Busca padrões de multiplicação (ex: 3 BLISTERS X 10)
-    m = re.search(r'\b(\d+)\s+(?:BL|ENV|STRIP|CPR|CAP|AMP|FA|FR|SER|TB|BS|CJ).*?X\s+(\d+)\b', apres)
+    # Lista de unidades de peso/volume que NÃO devem ser multiplicadas
+    unidades_ignoradas = r'(?:ML|MG|G|MCG|UI|%|L|KG|GOTAS)'
+    
+    # 2. Busca padrões de multiplicação válidos (ex: 3 BL X 10) - IGNORANDO ML/MG
+    m = re.search(rf'\b(\d+)\s+(?:BL|ENV|STRIP|CPR|CAP|AMP|FA|FR|SER|TB|BS|CJ|SVD).*?X\s+(\d+)\b(?!\s*{unidades_ignoradas})', apres)
     if m: 
         return float(m.group(1)) * float(m.group(2))
     
-    # Busca padrão "X Quantidade" (ex: CX X 30)
-    m = re.search(r'X\s+(\d+)\b(?!\s*(?:ML|MG|G|MCG|UI|%))', apres)
+    # 3. Busca quantidade principal de embalagens físicas ANTES de ML (ex: "50 AMP X 2 ML" -> Pega o 50)
+    m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|TB|BS|CJ|BOLS|CARP|TUB|BOMBA|CANETA|SVD|CX|CT)\b', apres)
+    if m:
+        return float(m.group(1))
+    
+    # 4. Busca padrão "X Quantidade" (ex: CX X 30) - IGNORANDO ML/MG
+    m = re.search(rf'X\s+(\d+)\b(?!\s*{unidades_ignoradas})', apres)
     if m: 
         return float(m.group(1))
     
-    # Busca padrão "Contém/Com" (ex: CT C/ 20)
+    # 5. Busca padrão "Contém/Com" (ex: CT C/ 20)
     m = re.search(r'(?:C/|CT|CX|COM|CONTEM)\s*(\d+)\b', apres)
     if m: 
         return float(m.group(1))
     
+    # Se nada bater, considera que é 1 unidade
     return 1
 
 def formatar_moeda(val):
@@ -78,7 +88,6 @@ def carregar_cmed():
 
 def processar_dados(file_proposta, df_cmed, coluna_icms):
     try:
-        # Leitura Robusta
         if file_proposta.name.endswith('.xls'):
             df_raw = pd.read_excel(file_proposta, header=None, engine='xlrd')
         else:
@@ -94,7 +103,6 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         df_prop = df_raw.iloc[linha_cab+1:].copy()
         df_prop.columns = df_raw.iloc[linha_cab].astype(str).str.strip()
         
-        # Identificação de Colunas
         c_desc = [c for c in df_prop.columns if any(x in str(c) for x in ['D i s c', 'Nome Com', 'Descrição'])][0]
         c_reg = [c for c in df_prop.columns if 'REG.M.S' in str(c).upper().replace(' ', '') or 'REGISTRO' in str(c).upper()][0]
         c_vlr = [c for c in df_prop.columns if 'VLR' in str(c).upper() and 'UNIT' in str(c).upper()][0]
@@ -108,7 +116,7 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         df_m = pd.merge(df_prop, df_cmed[['Reg_C', coluna_icms, c_apres_cmed]], left_on='Reg_L', right_on='Reg_C', how='left')
         df_m['PF_Num'] = df_m[coluna_icms].apply(formatar_moeda)
         
-        # CÁLCULO BASEADO APENAS NA CMED
+        # CÁLCULO DE DIVISOR CMED SEGURO
         df_m['Divisor'] = df_m[c_apres_cmed].apply(extrair_qtd_cmed)
         df_m['Teto_U'] = df_m['PF_Num'] / df_m['Divisor']
 
@@ -157,7 +165,6 @@ else:
         st.subheader("🚨 Preços Acima do Teto")
         if df_p.empty: st.success("Tudo OK!")
         else:
-            # CORREÇÃO DO ERRO DE FORMATAÇÃO AQUI:
             st.dataframe(
                 df_p[['Col_Item', 'Col_Desc', 'V_Unit', 'Teto_U', 'Diferenca']].style.format({
                     'V_Unit': '{:.4f}', 
@@ -180,21 +187,22 @@ else:
             pdf = FPDF(orientation='L', unit='mm', format='A4')
             
             # PÁGINA 1: DIVERGÊNCIAS
-            pdf.add_page()
-            pdf.set_font("Arial", 'B', 14); pdf.set_text_color(180, 0, 0)
-            pdf.cell(0, 10, f"DIVERGENCIAS DE PRECO - {st.session_state.aliquota}", ln=True, align='C')
-            pdf.ln(5)
-            pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(230, 230, 230)
-            pdf.cell(15, 8, "Item", 1, 0, 'C', True); pdf.cell(160, 8, "Descricao", 1, 0, 'C', True)
-            pdf.cell(30, 8, "Proposta", 1, 0, 'C', True); pdf.cell(30, 8, "Teto", 1, 0, 'C', True); pdf.cell(30, 8, "Dif.", 1, 1, 'C', True)
-            
-            pdf.set_font("Arial", '', 8)
-            for _, row in df_p.iterrows():
-                pdf.cell(15, 7, str(row['Col_Item']), 1, 0, 'C')
-                pdf.cell(160, 7, str(row['Col_Desc'])[:95].encode('latin-1', 'replace').decode('latin-1'), 1)
-                pdf.cell(30, 7, f"{row['V_Unit']:.4f}", 1, 0, 'C')
-                pdf.cell(30, 7, f"{row['Teto_U']:.4f}", 1, 0, 'C')
-                pdf.cell(30, 7, f"{row['Diferenca']:.4f}", 1, 1, 'C')
+            if not df_p.empty:
+                pdf.add_page()
+                pdf.set_font("Arial", 'B', 14); pdf.set_text_color(180, 0, 0)
+                pdf.cell(0, 10, f"DIVERGENCIAS DE PRECO - {st.session_state.aliquota}", ln=True, align='C')
+                pdf.ln(5)
+                pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(230, 230, 230)
+                pdf.cell(15, 8, "Item", 1, 0, 'C', True); pdf.cell(160, 8, "Descricao", 1, 0, 'C', True)
+                pdf.cell(30, 8, "Proposta", 1, 0, 'C', True); pdf.cell(30, 8, "Teto", 1, 0, 'C', True); pdf.cell(30, 8, "Dif.", 1, 1, 'C', True)
+                
+                pdf.set_font("Arial", '', 8)
+                for _, row in df_p.iterrows():
+                    pdf.cell(15, 7, str(row['Col_Item']), 1, 0, 'C')
+                    pdf.cell(160, 7, str(row['Col_Desc'])[:95].encode('latin-1', 'replace').decode('latin-1'), 1)
+                    pdf.cell(30, 7, f"{row['V_Unit']:.4f}", 1, 0, 'C')
+                    pdf.cell(30, 7, f"{row['Teto_U']:.4f}", 1, 0, 'C')
+                    pdf.cell(30, 7, f"{row['Diferenca']:.4f}", 1, 1, 'C')
 
             # PÁGINA 2: ALERTAS DE REGISTRO
             if not df_r.empty:
@@ -207,7 +215,4 @@ else:
                 pdf.set_font("Arial", '', 8)
                 for _, row in df_r.iterrows():
                     pdf.cell(15, 7, str(row['Col_Item']), 1, 0, 'C')
-                    pdf.cell(190, 7, str(row['Col_Desc'])[:110].encode('latin-1', 'replace').decode('latin-1'), 1)
-                    pdf.cell(50, 7, str(row['Col_Reg']), 1, 1, 'C')
-
-            st.download_button("💾 Baixar PDF do Relatório", pdf.output(dest='S').encode('latin-1'), "Relatorio_Auditoria.pdf", "application/pdf")
+                    pdf.cell(190, 7, str(row['Col_Desc'])[:110
