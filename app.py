@@ -22,11 +22,36 @@ def buscar_cabecalho(df, colunas_alvo):
 def limpar_nome_coluna(col):
     """Padroniza os nomes das colunas da CMED para evitar erros de espaços da Anvisa"""
     nome = str(col).upper().strip()
-    # Substitui múltiplos espaços por um só
     nome = re.sub(r'\s+', ' ', nome)
-    # Remove o espaço que a Anvisa coloca antes da porcentagem (ex: 'PF 20,5 %' vira 'PF 20,5%')
     nome = nome.replace(" %", "%")
     return nome
+
+# NOVA FUNÇÃO: Trazida do Colab - Extração agressiva de quantidades
+def extrair_qtd_cmed(apres):
+    apres = str(apres).upper()
+    if "DOS" in apres: return 1
+    # Escudo para não fracionar Soro, Injetáveis e Cremes (ML, MG, G)
+    m = re.search(r'\b(\d+)\s+(?:BL|ENV|STRIP).*?X\s+(\d+)\b(?!\s*(?:ML|MG|G|MCG|UI))', apres)
+    if m: return int(m.group(1)) * int(m.group(2))
+    m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|BOLS|CARP|TUB|BOMBA|CANETA|SVD)\b', apres)
+    if m: return int(m.group(1))
+    m = re.search(r'X\s+(\d+)\b(?!\s*(?:ML|MG|G|MCG|UI|U\.I\.))', apres)
+    if m: return int(m.group(1))
+    return 1
+
+# NOVA FUNÇÃO: Leitor robusto para lidar com falsos .xls gerados por ERPs
+def ler_proposta_robusto(file_obj):
+    try:
+        df = pd.read_excel(file_obj, header=None)
+        return df
+    except:
+        try:
+            file_obj.seek(0) # Retorna o ponteiro do arquivo para o início
+            content = file_obj.read().decode('latin1')
+            df = pd.read_csv(io.StringIO(content), sep=None, engine='python', header=None)
+            return df
+        except Exception as e:
+            raise Exception(f"Não foi possível ler o arquivo da proposta. Verifique se o formato é válido. Erro: {e}")
 
 # Cache para carregar a CMED apenas uma vez
 @st.cache_data
@@ -40,10 +65,8 @@ def carregar_cmed():
         else:
             df = pd.read_excel('cmed_atual.xlsx')
             
-        # Aplica a limpeza nos nomes de todas as colunas da CMED
         df.columns = [limpar_nome_coluna(c) for c in df.columns]
             
-        # Padronização de Colunas Base
         colunas_cmed = {
             'REGISTRO': ['REGISTRO', 'Nº REGISTRO', 'REGISTRO MS', 'NO REGISTRO'],
             'APRESENTAÇÃO': ['APRESENTAÇÃO', 'APRESENTACAO', 'DESCRICAO_CMED']
@@ -61,24 +84,31 @@ def carregar_cmed():
 
 def processar_dados(file_proposta, df_cmed, coluna_icms):
     try:
-        df_raw = pd.read_excel(file_proposta, header=None)
+        # Usa o leitor robusto que não quebra com falsos XLS
+        df_raw = ler_proposta_robusto(file_proposta)
         idx_cabecalho = buscar_cabecalho(df_raw, ['Reg.M.S', 'Registro MS', 'REG. MS', 'Registro'])
         
         if idx_cabecalho is None:
             return None, "Cabeçalho 'Reg.M.S' não identificado na proposta."
 
-        df_prop = pd.read_excel(file_proposta, skiprows=idx_cabecalho)
+        # Fatiamento do DataFrame sem precisar ler o arquivo de novo
+        df_prop = df_raw.iloc[idx_cabecalho+1:].copy()
+        df_prop.columns = df_raw.iloc[idx_cabecalho].astype(str).str.strip()
         
+        # Inclusão das variações de descrição vistas no Colab ('Nome Comercial', 'D i s c r i m i n a ç ã o')
         colunas_prop = {
             'Reg.M.S': ['Reg.M.S', 'REG. MS', 'Registro MS', 'Registro'],
             'Vlr. Unit.': ['Vlr. Unit.', 'Valor Unitário', 'Preço Unit.', 'Unitário', 'Vlr.Unit'],
-            'Descrição': ['Descrição', 'PRODUTO', 'Item', 'NOME DO PRODUTO', 'Descricao']
+            'Descrição': ['Descrição', 'PRODUTO', 'Item', 'NOME DO PRODUTO', 'Descricao', 'Nome Comercial', 'D i s c r i m i n a ç ã o']
         }
         
+        # Mapeamento e renomeação
         for oficial, variantes in colunas_prop.items():
             for v in variantes:
-                if v in df_prop.columns:
-                    df_prop.rename(columns={v: oficial}, inplace=True)
+                # Busca flexível por parte do nome (como no Colab)
+                match = [c for c in df_prop.columns if v.upper().replace(' ', '') in str(c).upper().replace(' ', '')]
+                if match:
+                    df_prop.rename(columns={match[0]: oficial}, inplace=True)
                     break
 
         if 'Reg.M.S' not in df_prop.columns or 'Vlr. Unit.' not in df_prop.columns:
@@ -87,9 +117,7 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         if 'REGISTRO' not in df_cmed.columns:
             return None, "Coluna de Registro não encontrada na CMED."
 
-        # Verifica se a coluna de ICMS escolhida existe na CMED
         if coluna_icms not in df_cmed.columns:
-            # Mostra as colunas que têm 'PF' para ajudar a identificar se a Anvisa mudou muito a nomenclatura
             cols_pf = [c for c in df_cmed.columns if 'PF' in c]
             return None, f"A coluna '{coluna_icms}' não foi encontrada na CMED. Colunas lidas: {cols_pf}"
 
@@ -99,14 +127,9 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         
         resultado = pd.merge(df_prop, df_cmed_copy, on='REG_LIMPO', how='inner')
         
+        # Aplicação da matemática correta (igual ao Colab)
         def calcular_teto(row):
-            apres = str(row['APRESENTAÇÃO']).upper()
-            if "DOS" in apres:
-                qtd = 1
-            else:
-                match = re.search(r'(\d+)\s*(?:COMP|CAP|DRG|ENV|FR|AMP|SER|TAB|UNID|UN)', apres)
-                qtd = int(match.group(1)) if match else 1
-                
+            qtd = extrair_qtd_cmed(row['APRESENTAÇÃO'])
             pf = str(row[coluna_icms]).replace(',', '.') if isinstance(row[coluna_icms], str) else row[coluna_icms]
             return float(pf) / qtd
 
@@ -116,7 +139,8 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
             lambda x: float(str(x).replace(',', '.')) if isinstance(x, str) else x
         )
         
-        acima = resultado[resultado['Vlr. Unit.'] > (resultado['Teto_Unitario'] + 0.0001)].copy()
+        # Removida a tolerância de erro de arredondamento para ficar rigorosamente igual ao Colab
+        acima = resultado[resultado['Vlr. Unit.'] > resultado['Teto_Unitario']].copy()
         
         return acima, None
 
