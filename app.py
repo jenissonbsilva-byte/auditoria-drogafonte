@@ -9,11 +9,8 @@ from fpdf import FPDF
 st.set_page_config(page_title="Auditoria Drogafonte", page_icon="💊", layout="centered")
 
 # 2. LOGO E TÍTULO
-# Tenta carregar a logo. Se não encontrar, exibe apenas o título.
 if os.path.exists("logo_drogafonte.png"):
     st.image("logo_drogafonte.png", width=250)
-else:
-    st.sidebar.warning("Arquivo 'logo_drogafonte.png' não encontrado no GitHub.")
 
 st.title("Portal de Auditoria - Drogafonte")
 st.markdown("Valide suas propostas contra o teto da **CMED** com inteligência de fracionamento.")
@@ -43,13 +40,17 @@ def extrair_qtd_cmed(apres):
     return 1
 
 def ler_proposta_robusto(file_buffer):
+    # Tenta ler como Excel real primeiro
     try:
-        # Tenta ler como Excel real
         return pd.read_excel(file_buffer, header=None)
-    except:
-        # Fallback para CSV/TXT disfarçado de XLS (comum em ERPs)
+    except Exception:
+        # Fallback para CSV/TXT (muitos arquivos .xls de ERP são na verdade CSVs)
         file_buffer.seek(0)
-        return pd.read_csv(file_buffer, encoding='latin1', sep=None, engine='python', header=None, on_bad_lines='skip')
+        try:
+            return pd.read_csv(file_buffer, encoding='latin1', sep=None, engine='python', header=None, on_bad_lines='skip')
+        except:
+            st.error("Não foi possível decodificar o arquivo. Certifique-se de que é um Excel ou CSV válido.")
+            return None
 
 # 5. ÁREA DE UPLOAD
 uploaded_file = st.file_uploader("📥 Arraste a proposta (Excel ou arquivo do sistema)", type=['xls', 'xlsx', 'csv'])
@@ -59,10 +60,14 @@ if uploaded_file is not None:
         with st.spinner('Cruzando dados com a base da Anvisa...'):
             try:
                 # Carregar Base CMED
+                if not os.path.exists('cmed_atual.xlsx'):
+                    st.error("Arquivo 'cmed_atual.xlsx' não encontrado no repositório GitHub.")
+                    st.stop()
+
                 df_cmed = pd.read_excel('cmed_atual.xlsx')
                 df_cmed.columns = df_cmed.columns.astype(str).str.strip()
                 
-                # Localizar cabeçalho da CMED se necessário
+                # Localizar cabeçalho da CMED
                 if 'REGISTRO' not in df_cmed.columns:
                     for i, r in pd.read_excel('cmed_atual.xlsx', header=None).iterrows():
                         if r.astype(str).str.contains('REGISTRO').any():
@@ -70,30 +75,44 @@ if uploaded_file is not None:
                             df_cmed.columns = df_cmed.columns.astype(str).str.strip()
                             break
                 
-                c_apres_cmed = [c for c in df_cmed.columns if 'APRESENTA' in str(c).upper()][0]
+                lista_col_apres = [c for c in df_cmed.columns if 'APRESENTA' in str(c).upper()]
+                if not lista_col_apres:
+                    st.error("Coluna de 'Apresentação' não encontrada na tabela CMED.")
+                    st.stop()
+                c_apres_cmed = lista_col_apres[0]
 
                 # Processar Proposta
                 df_raw = ler_proposta_robusto(uploaded_file)
+                if df_raw is None: st.stop()
                 
-                # Localizar linha do cabeçalho na proposta
+                # Localizar linha do cabeçalho na proposta de forma segura
                 linha_cab = 0
+                achou_cabecalho = False
                 for i, row in df_raw.iterrows():
                     if row.astype(str).str.contains('Reg.M.S|Vlr. Unit.', case=False).any():
                         linha_cab = i
+                        achou_cabecalho = True
                         break
                 
-                # Capturar dados da Drogafonte para o cabeçalho do PDF
+                if not achou_cabecalho:
+                    st.error("Cabeçalho da Proposta (Reg.M.S / Vlr. Unit.) não identificado.")
+                    st.stop()
+
                 cabecalho_pdf = [" ".join(df_raw.iloc[j].dropna().astype(str).tolist()) for j in range(linha_cab) if str(df_raw.iloc[j].dropna()).strip()]
 
                 df_prop = df_raw.iloc[linha_cab+1:].copy()
                 df_prop.columns = df_raw.iloc[linha_cab].astype(str).str.strip()
 
-                # Mapear colunas da proposta
-                c_desc = [c for c in df_prop.columns if any(x in str(c) for x in ['D i s c', 'Descrição', 'Nome'])][0]
-                c_reg = [c for c in df_prop.columns if 'REG.M.S' in str(c).upper().replace(' ', '') or 'REGISTRO' in str(c).upper()][0]
-                c_vlr = [c for c in df_prop.columns if 'VLR' in str(c).upper() and 'UNIT' in str(c).upper()][0]
+                # Busca de colunas de forma segura (Prevenção de 'index out of range')
+                def get_col(df, keywords, default_idx):
+                    found = [c for c in df.columns if any(k.upper() in str(c).upper() for k in keywords)]
+                    return found[0] if found else df.columns[default_idx]
 
-                # Cálculos de Auditoria
+                c_desc = get_col(df_prop, ['D i s c', 'Descrição', 'PRODUTO', 'Nome'], 2)
+                c_reg = get_col(df_prop, ['REG.M.S', 'REGISTRO', 'MS'], 6)
+                c_vlr = get_col(df_prop, ['VLR', 'UNIT', 'PREÇO'], 9)
+
+                # Cálculos
                 df_prop['Reg_L'] = df_prop[c_reg].astype(str).str.replace(r'[^0-9]', '', regex=True)
                 df_cmed['Reg_C'] = df_cmed['REGISTRO'].astype(str).str.replace(r'[^0-9]', '', regex=True)
                 df_prop['V_Unit'] = df_prop[c_vlr].astype(str).str.replace(',', '.').astype(float)
@@ -105,11 +124,10 @@ if uploaded_file is not None:
                 
                 df_erros = df_m[df_m['V_Unit'] > (df_m['Teto_U'] + 0.0001)].copy()
 
-                # 6. GERAÇÃO DO PDF PROFISSIONAL
+                # 6. GERAÇÃO DO PDF
                 pdf = FPDF(orientation='L', unit='mm', format='A4')
                 pdf.add_page()
                 
-                # Logo no PDF (se existir)
                 if os.path.exists("logo_drogafonte.png"):
                     pdf.image("logo_drogafonte.png", 10, 8, 40)
                     pdf.ln(15)
@@ -151,7 +169,7 @@ if uploaded_file is not None:
                     st.download_button("📩 Baixar Relatório de Divergências (PDF)", f, file_name=pdf_file, mime="application/pdf", type="primary")
 
             except Exception as e:
-                st.error(f"Erro Crítico: {e}")
+                st.error(f"Erro de Processamento: {e}")
 
 # Rodapé
-st.caption("Drogafonte - Sistema de Integridade em Licitações Públicas v2.0")
+st.caption("Drogafonte - Sistema de Integridade em Licitações Públicas v2.1")
