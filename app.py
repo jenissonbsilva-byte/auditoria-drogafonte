@@ -215,4 +215,7 @@ else:
                 pdf.set_font("Arial", '', 8)
                 for _, row in df_r.iterrows():
                     pdf.cell(15, 7, str(row['Col_Item']), 1, 0, 'C')
-                    pdf.cell(190, 7, str(row['Col_Desc'])[:110
+                    pdf.cell(190, 7, str(row['Col_Desc'])[:110].encode('latin-1', 'replace').decode('latin-1'), 1)
+                    pdf.cell(50, 7, str(row['Col_Reg']), 1, 1, 'C')
+
+            st.download_button("💾 Baixar PDF do Relatório", pdf.output(dest='S').encode('latin-1'), "Relatorio_Auditoria.pdf", "application/pdf")
