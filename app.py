@@ -13,11 +13,20 @@ def limpar_registro(reg):
 
 def buscar_cabecalho(df, colunas_alvo):
     for i, row in df.iterrows():
-        # Blindagem: Força tudo a virar texto (str) antes de aplicar maiúsculo (.upper())
+        # Blindagem: Força tudo a virar texto (str) antes de aplicar maiúsculo
         row_str = [str(val).upper().strip() for val in row.tolist()]
         if any(str(col).upper() in row_str for col in colunas_alvo):
             return i
     return None
+
+def limpar_nome_coluna(col):
+    """Padroniza os nomes das colunas da CMED para evitar erros de espaços da Anvisa"""
+    nome = str(col).upper().strip()
+    # Substitui múltiplos espaços por um só
+    nome = re.sub(r'\s+', ' ', nome)
+    # Remove o espaço que a Anvisa coloca antes da porcentagem (ex: 'PF 20,5 %' vira 'PF 20,5%')
+    nome = nome.replace(" %", "%")
+    return nome
 
 # Cache para carregar a CMED apenas uma vez
 @st.cache_data
@@ -31,13 +40,13 @@ def carregar_cmed():
         else:
             df = pd.read_excel('cmed_atual.xlsx')
             
-        # Limpa os espaços em branco de todas as colunas para facilitar a busca
-        df.columns = [str(c).strip() for c in df.columns]
+        # Aplica a limpeza nos nomes de todas as colunas da CMED
+        df.columns = [limpar_nome_coluna(c) for c in df.columns]
             
         # Padronização de Colunas Base
         colunas_cmed = {
-            'REGISTRO': ['REGISTRO', 'Registro', 'Nº REGISTRO', 'REGISTRO MS', 'No REGISTRO'],
-            'APRESENTAÇÃO': ['APRESENTAÇÃO', 'Apresentação', 'APRESENTACAO', 'DESCRICAO_CMED']
+            'REGISTRO': ['REGISTRO', 'Nº REGISTRO', 'REGISTRO MS', 'NO REGISTRO'],
+            'APRESENTAÇÃO': ['APRESENTAÇÃO', 'APRESENTACAO', 'DESCRICAO_CMED']
         }
         
         for oficial, variantes in colunas_cmed.items():
@@ -80,7 +89,9 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
 
         # Verifica se a coluna de ICMS escolhida existe na CMED
         if coluna_icms not in df_cmed.columns:
-            return None, f"A coluna '{coluna_icms}' não foi encontrada na tabela CMED."
+            # Mostra as colunas que têm 'PF' para ajudar a identificar se a Anvisa mudou muito a nomenclatura
+            cols_pf = [c for c in df_cmed.columns if 'PF' in c]
+            return None, f"A coluna '{coluna_icms}' não foi encontrada na CMED. Colunas lidas: {cols_pf}"
 
         df_prop['REG_LIMPO'] = df_prop['Reg.M.S'].apply(limpar_registro)
         df_cmed_copy = df_cmed.copy()
