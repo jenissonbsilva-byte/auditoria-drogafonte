@@ -9,13 +9,30 @@ import base64
 # Configuração da Página
 st.set_page_config(page_title="Auditoria Drogafonte - CMED", layout="wide", page_icon="🛡️")
 
-# --- FUNÇÃO PARA LOGO (PREVINE QUE SUMA) ---
+# --- FUNÇÕES DE APOIO E LIMPEZA ---
 def get_image_base64(path):
     try:
         with open(path, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode()
     except:
         return None
+
+def limpar_registro(reg):
+    """Garante que o registro seja lido corretamente com 13 dígitos, sem problemas de float do Excel"""
+    if pd.isna(reg) or str(reg).strip().upper() in ['NAN', 'NONE', '']: 
+        return ""
+    
+    # Se o Pandas leu a coluna como número, converte para inteiro para matar notação científica
+    if isinstance(reg, (float, int)):
+        return str(int(reg))
+        
+    s = str(reg).strip()
+    # Remove '.0' no final caso tenha virado string antes
+    if s.endswith('.0'): 
+        s = s[:-2]
+        
+    # Remove qualquer caractere que não seja número
+    return re.sub(r'[^0-9]', '', s)
 
 # --- ESTADOS DO SISTEMA ---
 if 'tela_resultado' not in st.session_state:
@@ -26,33 +43,33 @@ def resetar_app():
     for key in ['dados_finais', 'erros_registro', 'cabecalho_pdf', 'erro', 'aliquota']:
         if key in st.session_state: del st.session_state[key]
 
-# --- MOTOR LÓGICO DE QUANTIDADES (CORRIGIDO PARA IGNORAR ML/MG) ---
+# --- MOTOR LÓGICO DE QUANTIDADES ---
 def extrair_qtd_cmed(apres):
     apres = str(apres).upper()
     
-    # 1. REGRA: Se for DOSE, o divisor é 1 (Unitário)
-    if "DOS" in apres or "DOSE" in apres: 
+    # 1. Blindagem Total para Respiratórios, Sprays e Doses (Sempre Unitário/Divisor 1)
+    if re.search(r'\b(DOS[A-Z]*|ACIONAMENTO[A-Z]*|JATO[A-Z]*|AER[A-Z]*|SPRAY|INALA[A-Z]*|PULVERIZA[A-Z]*)\b', apres):
         return 1
     
-    # Trava de segurança: impede que o sistema use ML, MG, UI como multiplicadores
+    # Unidades que não representam multiplicador de caixas
     unidades_ignoradas = r'(?:ML|MG|G|MCG|UI|%|L|KG|GOTAS|MM|CM)'
     
-    # 2. Busca padrões de multiplicação válidos (ex: 3 BL X 10)
+    # 2. Busca padrões de multiplicação (ex: 3 BL X 10)
     m = re.search(rf'\b(\d+)\s+(?:BL|ENV|STRIP|CPR|CAP|AMP|FA|FR|SER|TB|BS|CJ|SVD).*?X\s+(\d+)\b(?!\s*{unidades_ignoradas})', apres)
     if m: 
         return float(m.group(1)) * float(m.group(2))
     
-    # 3. Busca embalagens físicas ANTES da unidade de medida (ex: "50 AMP X 2 ML" -> extrai 50)
+    # 3. Busca embalagens físicas ANTES da unidade (ex: "50 AMP X 2 ML" -> 50)
     m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|TB|BS|CJ|BOLS|CARP|TUB|BOMBA|CANETA|SVD|CX|CT|BL|ENV|STRIP|CPR|CAP|UN)\b', apres)
     if m:
         return float(m.group(1))
     
-    # 4. Busca padrão "X Quantidade" (ex: "X 28" ou "X 30")
+    # 4. Busca padrão "X Quantidade" (ex: "X 28")
     m = re.search(rf'X\s+(\d+)\b(?!\s*{unidades_ignoradas})', apres)
     if m: 
         return float(m.group(1))
     
-    # 5. Busca padrão "Contém/Com" (ex: "CT C/ 500" ou "COM 500")
+    # 5. Busca padrão "Contém/Com" (ex: "CT C/ 500")
     m = re.search(r'(?:C/|CT|CX|COM|CONTEM)\s*(\d+)\b', apres)
     if m: 
         return float(m.group(1))
@@ -99,9 +116,7 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
                 linha_cab = i
                 break
         
-        # Coleta o cabeçalho da licitação para o PDF
         cabecalho_info = [" ".join(df_raw.iloc[j].dropna().astype(str).tolist()) for j in range(linha_cab) if str(df_raw.iloc[j].dropna()).strip()]
-        
         df_prop = df_raw.iloc[linha_cab+1:].copy()
         df_prop.columns = df_raw.iloc[linha_cab].astype(str).str.strip()
         
@@ -110,15 +125,16 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         c_vlr = [c for c in df_prop.columns if 'VLR' in str(c).upper() and 'UNIT' in str(c).upper()][0]
         c_item = [c for c in df_prop.columns if 'ITEM' in str(c).upper()][0]
 
-        df_prop['Reg_L'] = df_prop[c_reg].astype(str).str.replace(r'[^0-9]', '', regex=True)
-        df_cmed['Reg_C'] = df_cmed['REGISTRO'].astype(str).str.replace(r'[^0-9]', '', regex=True)
+        # APLICANDO A NOVA LIMPEZA DE REGISTROS AQUI:
+        df_prop['Reg_L'] = df_prop[c_reg].apply(limpar_registro)
+        df_cmed['Reg_C'] = df_cmed['REGISTRO'].apply(limpar_registro)
+        
         df_prop['V_Unit'] = df_prop[c_vlr].apply(formatar_moeda)
         c_apres_cmed = [c for c in df_cmed.columns if 'APRESENTA' in str(c).upper()][0]
 
         df_m = pd.merge(df_prop, df_cmed[['Reg_C', coluna_icms, c_apres_cmed]], left_on='Reg_L', right_on='Reg_C', how='left')
         df_m['PF_Num'] = df_m[coluna_icms].apply(formatar_moeda)
         
-        # CÁLCULO BASEADO APENAS NA CMED
         df_m['Divisor'] = df_m[c_apres_cmed].apply(extrair_qtd_cmed)
         df_m['Teto_U'] = df_m['PF_Num'] / df_m['Divisor']
 
@@ -168,7 +184,9 @@ else:
         if df_p.empty: 
             st.success("Tudo OK! Nenhum item com preço abusivo.")
         else:
-            # Exibição na tela com PF_CMED e Divisor para total transparência
+            # AVISO SOBRE O DOWNLOAD EM CSV vs EXCEL
+            st.info("💡 **Dica de Exportação:** O pequeno ícone que aparece no canto da tabela abaixo faz o download apenas em `.csv` (padrão da ferramenta). Para baixar a planilha formatada em **Excel**, role um pouco a tela e clique no botão azul gigante **'📥 Baixar Auditoria Completa (Excel)'**.")
+            
             exib_p = df_p[['Col_Item', 'Col_Desc', 'V_Unit', 'PF_Num', 'Divisor', 'Teto_U', 'Diferenca']].copy()
             exib_p.columns = ['Item', 'Descrição', 'Valor Proposta', 'PF CMED', 'Divisor', 'Teto Unit.', 'Diferença']
             st.dataframe(
@@ -188,17 +206,14 @@ else:
             st.dataframe(df_r[['Col_Item', 'Col_Desc', 'Col_Reg']], use_container_width=True)
         
         # DOWNLOAD EXCEL
-        st.download_button("📥 Baixar Auditoria Completa (Excel)", exportar_excel(df_p, df_r), "Auditoria_Drogafonte.xlsx")
+        st.download_button("📥 Baixar Auditoria Completa (Excel)", exportar_excel(df_p, df_r), "Auditoria_Drogafonte.xlsx", use_container_width=True)
 
-        # GERADOR DE PDF UNIFICADO
+        # GERADOR DE PDF
         if st.button("📄 Gerar Relatório PDF Final", type="primary", use_container_width=True):
             pdf = FPDF(orientation='L', unit='mm', format='A4')
             
-            # PÁGINA 1: DIVERGÊNCIAS
             if not df_p.empty:
                 pdf.add_page()
-                
-                # CABEÇALHO DO PDF RESTAURADO
                 pdf.set_font("Arial", 'B', 9)
                 for h in st.session_state.cabecalho_pdf[:5]: 
                     pdf.cell(0, 5, str(h).encode('latin-1', 'replace').decode('latin-1'), ln=True)
@@ -208,7 +223,6 @@ else:
                 pdf.cell(0, 10, f"DIVERGENCIAS DE PRECO - {st.session_state.aliquota}", ln=True, align='C')
                 pdf.ln(3)
                 
-                # Layout das Colunas ajustado
                 pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(230, 230, 230)
                 pdf.cell(15, 8, "Item", 1, 0, 'C', True)
                 pdf.cell(130, 8, "Descricao", 1, 0, 'C', True)
@@ -228,7 +242,6 @@ else:
                     pdf.cell(25, 7, f"{row['Teto_U']:.4f}", 1, 0, 'C')
                     pdf.cell(25, 7, f"{row['Diferenca']:.4f}", 1, 1, 'C')
 
-            # PÁGINA 2: ALERTAS DE REGISTRO
             if not df_r.empty:
                 pdf.add_page()
                 pdf.set_font("Arial", 'B', 14); pdf.set_text_color(0)
