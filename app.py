@@ -3,9 +3,19 @@ import pandas as pd
 from fpdf import FPDF
 import io
 import re
+import os
 
 # Configuração da página
 st.set_page_config(page_title="Auditoria Drogafonte - CMED", layout="wide")
+
+# Cache para carregar a CMED apenas uma vez (deixa o app muito mais rápido)
+@st.cache_data
+def carregar_cmed():
+    # Verifica se o arquivo existe na base
+    if os.path.exists('cmed_atual.xlsx'):
+        return pd.read_excel('cmed_atual.xlsx')
+    else:
+        return None
 
 def limpar_registro(reg):
     """Limpa o Registro MS para garantir o cruzamento correto"""
@@ -58,15 +68,11 @@ def processar_dados(file_proposta, df_cmed):
         
         # Lógica de Unidade vs Caixa (Apresentação)
         def calcular_teto(row):
-            # Extrair quantidade da apresentação (Ex: "10 COMP" -> 10)
-            # Se for DOS (Dose), consideramos 1 unitário conforme sua regra
             if "DOS" in str(row['APRESENTAÇÃO']).upper():
                 qtd = 1
             else:
                 match = re.search(r'(\d+)\s*(?:COMP|CAP|DRG|ENV|FR|AMP|SER|TAB)', str(row['APRESENTAÇÃO']).upper())
                 qtd = int(match.group(1)) if match else 1
-            
-            # Valor teto unitário (PF 20,5% / Qtd)
             return row['PF 20,5%'] / qtd
 
         resultado['Teto_Unitario'] = resultado.apply(calcular_teto, axis=1)
@@ -83,16 +89,20 @@ def processar_dados(file_proposta, df_cmed):
 st.title("🛡️ Auditoria Drogafonte - Validador CMED")
 st.markdown("---")
 
-# Upload da Base CMED (Fixa ou Mensal)
-with st.sidebar:
-    st.header("Configurações")
-    cmed_file = st.file_uploader("Carregar Tabela CMED (Excel)", type=['xlsx'])
-    # Link para Logo (Substitua pela URL da imagem da Drogafonte se tiver)
-    st.image("https://drogafonte.com.br/wp-content/uploads/2021/10/logo-drogafonte.png", width=200)
+# Carrega a base CMED fixa
+df_cmed = carregar_cmed()
 
-if cmed_file:
-    df_cmed = pd.read_excel(cmed_file)
-    
+with st.sidebar:
+    st.image("https://drogafonte.com.br/wp-content/uploads/2021/10/logo-drogafonte.png", width=200)
+    st.header("Informações do Sistema")
+    if df_cmed is not None:
+        st.success("✅ Base CMED carregada com sucesso!")
+    else:
+        st.error("❌ Arquivo 'cmed_atual.xlsx' não encontrado na base.")
+    st.markdown("Faça o upload da proposta ao lado para iniciar a auditoria.")
+
+# Área Principal
+if df_cmed is not None:
     upload_prop = st.file_uploader("Selecione a Proposta para Analisar", type=['xls', 'xlsx'])
 
     if upload_prop:
@@ -112,25 +122,24 @@ if cmed_file:
                     pdf = FPDF()
                     pdf.add_page()
                     
-                    # Cabeçalho do PDF
                     pdf.set_font("Arial", 'B', 16)
-                    pdf.cell(190, 10, "RELATÓRIO DE AUDITORIA - DROGAFONTE", 0, 1, 'C')
+                    pdf.cell(190, 10, "RELATORIO DE AUDITORIA - DROGAFONTE", 0, 1, 'C')
                     pdf.set_font("Arial", '', 10)
                     pdf.cell(190, 10, f"Proposta: {upload_prop.name}", 0, 1, 'C')
                     pdf.ln(10)
                     
-                    # Tabela
                     pdf.set_font("Arial", 'B', 8)
                     pdf.set_fill_color(200, 200, 200)
-                    pdf.cell(80, 8, "Descrição", 1, 0, 'C', True)
+                    pdf.cell(80, 8, "Descricao", 1, 0, 'C', True)
                     pdf.cell(30, 8, "Vlr. Prop.", 1, 0, 'C', True)
                     pdf.cell(30, 8, "Teto CMED", 1, 0, 'C', True)
-                    pdf.cell(30, 8, "Diferença", 1, 1, 'C', True)
+                    pdf.cell(30, 8, "Diferenca", 1, 1, 'C', True)
                     
                     pdf.set_font("Arial", '', 7)
                     for _, r in dados_finais.iterrows():
-                        # Descrição truncada para caber
-                        desc = str(r['Descrição'])[:45]
+                        # Removendo acentos e caracteres especiais para evitar erros no FPDF
+                        desc = str(r['Descrição'])[:45].encode('latin-1', 'replace').decode('latin-1')
+                        
                         pdf.cell(80, 7, desc, 1)
                         pdf.cell(30, 7, f"R$ {r['Vlr. Unit.']:.4f}", 1, 0, 'C')
                         pdf.cell(30, 7, f"R$ {r['Teto_Unitario']:.4f}", 1, 0, 'C')
@@ -139,5 +148,3 @@ if cmed_file:
 
                     pdf_output = pdf.output(dest='S').encode('latin-1')
                     st.download_button("Baixar PDF", data=pdf_output, file_name="relatorio_auditoria.pdf", mime="application/pdf")
-else:
-    st.info("Aguardando upload da tabela CMED no menu lateral.")
