@@ -34,7 +34,7 @@ if 'tela_resultado' not in st.session_state:
 
 def resetar_app():
     st.session_state.tela_resultado = False
-    for key in ['dados_finais', 'erros_registro', 'cabecalho_pdf', 'erro', 'aliquota']:
+    for key in ['dados_todos', 'dados_finais', 'erros_registro', 'cabecalho_pdf', 'erro', 'aliquota']:
         if key in st.session_state: del st.session_state[key]
 
 # --- MOTOR LÓGICO DE QUANTIDADES ---
@@ -42,32 +42,24 @@ def extrair_qtd_cmed(apres_cmed, desc_proposta):
     apres = str(apres_cmed).upper()
     desc = str(desc_proposta).upper()
     
-    # 1. Blindagem Total para Respiratórios, Sprays e Doses (Olha a CMED e a Proposta)
-    # Usa \b para garantir que "DOSES" ou "DOSE" seja pego, mas ignore palavras como "DOSAGEM"
     padrao_dose = r'\b(DOSES?|AEROSSOL|AEROSOL|AER\b|SPRAY|JATOS?|ACIONAMENTOS?|INALADOR|PULVERIZA[A-Z]*)\b'
-    
     if re.search(padrao_dose, apres) or re.search(padrao_dose, desc):
         return 1
     
-    # Unidades que não representam multiplicador de caixas
     unidades_ignoradas = r'(?:ML|MG|G|MCG|UI|%|L|KG|GOTAS|MM|CM)'
     
-    # 2. Busca padrões de multiplicação (ex: 3 BL X 10)
     m = re.search(rf'\b(\d+)\s+(?:BL|ENV|STRIP|CPR|CAP|AMP|FA|FR|SER|TB|BS|CJ|SVD).*?X\s+(\d+)\b(?!\s*{unidades_ignoradas})', apres)
     if m: 
         return float(m.group(1)) * float(m.group(2))
     
-    # 3. Busca embalagens físicas ANTES da unidade (ex: "500 CPR" -> 500)
     m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|TB|BS|CJ|BOLS|CARP|TUB|BOMBA|CANETA|SVD|CX|CT|BL|ENV|STRIP|CPR|COMP?|CPRS|CAP|UN)\b', apres)
     if m:
         return float(m.group(1))
     
-    # 4. Busca padrão "X Quantidade" (ex: "X 500")
     m = re.search(rf'X\s+(\d+)\b(?!\s*{unidades_ignoradas})', apres)
     if m: 
         return float(m.group(1))
     
-    # 5. Busca padrão "Contém/Com" (ex: "CT C/ 500" ou "COM 500")
     m = re.search(r'(?:C/|CT|CX|COM|CONTEM)\s*(\d+)\b', apres)
     if m: 
         return float(m.group(1))
@@ -82,9 +74,10 @@ def formatar_moeda(val):
     try: return float(v)
     except: return 0.0
 
-def exportar_excel(df_precos, df_alertas):
+def exportar_excel(df_todos, df_precos, df_alertas):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_todos.to_excel(writer, index=False, sheet_name='Analise_Completa')
         df_precos.to_excel(writer, index=False, sheet_name='Divergencias_Preco')
         df_alertas.to_excel(writer, index=False, sheet_name='Alertas_Registro')
     return output.getvalue()
@@ -131,21 +124,23 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         df_m = pd.merge(df_prop, df_cmed[['Reg_C', coluna_icms, c_apres_cmed]], left_on='Reg_L', right_on='Reg_C', how='left')
         df_m['PF_Num'] = df_m[coluna_icms].apply(formatar_moeda)
         
-        # Envia tanto a apresentação CMED quanto a Descrição da Proposta para avaliar Doses/Sprays
         df_m['Divisor'] = df_m.apply(lambda row: extrair_qtd_cmed(row[c_apres_cmed], row[c_desc]), axis=1)
         df_m['Teto_U'] = df_m['PF_Num'] / df_m['Divisor']
+        df_m['Diferenca'] = df_m['V_Unit'] - df_m['Teto_U']
 
-        df_precos = df_m[(df_m['V_Unit'] > (df_m['Teto_U'] + 0.0005)) & (df_m['Teto_U'] > 0)].copy()
+        # Prepara a tabela completa com mapeamento de colunas
+        df_m['Col_Item'] = df_m[c_item]
+        df_m['Col_Desc'] = df_m[c_desc]
+        df_m['Col_Reg'] = df_m[c_reg]
+        df_m['Status'] = df_m.apply(lambda x: '🔴 Acima do Teto' if x['Diferenca'] > 0.0005 else '🟢 Dentro do Teto', axis=1)
+
+        # Filtra os com problema
+        df_precos = df_m[(df_m['Diferenca'] > 0.0005) & (df_m['Teto_U'] > 0)].copy()
         df_reg_err = df_m[(df_m['Reg_L'].str.len() > 0) & ((df_m['Reg_L'].str.len() != 13) | (df_m['Reg_C'].isna()))].copy()
 
-        for df in [df_precos, df_reg_err]:
-            if not df.empty:
-                df['Col_Item'] = df[c_item]; df['Col_Desc'] = df[c_desc]; df['Col_Reg'] = df[c_reg]
-                if 'Teto_U' in df.columns: df['Diferenca'] = df['V_Unit'] - df['Teto_U']
-
-        return df_precos, df_reg_err, cabecalho_info, None
+        return df_m, df_precos, df_reg_err, cabecalho_info, None
     except Exception as e:
-        return None, None, None, f"Erro: {str(e)}"
+        return None, None, None, None, f"Erro: {str(e)}"
 
 # --- INTERFACE ---
 df_cmed = carregar_cmed()
@@ -159,13 +154,13 @@ with st.sidebar:
     st.divider()
     aliquota = st.selectbox("ICMS Destino:", ["PF 12%", "PF 17%", "PF 17,5%", "PF 18%", "PF 19%", "PF 19,5%", "PF 20%", "PF 20,5%", "PF 21%", "PF 22%"], index=7)
 
-st.title("🛡️ Validador CMED - Drogafonte")
+st.title("🛡️ Validador CMED - Modo Diagnóstico")
 
 if not st.session_state.tela_resultado:
     upload = st.file_uploader("Arraste a Proposta", type=['xls', 'xlsx', 'csv'])
     if upload and st.button("🚀 Iniciar Auditoria", use_container_width=True, type="primary"):
-        p, r, c, err = processar_dados(upload, df_cmed, aliquota)
-        st.session_state.dados_finais, st.session_state.erros_registro, st.session_state.cabecalho_pdf, st.session_state.erro, st.session_state.aliquota = p, r, c, err, aliquota
+        t, p, r, c, err = processar_dados(upload, df_cmed, aliquota)
+        st.session_state.dados_todos, st.session_state.dados_finais, st.session_state.erros_registro, st.session_state.cabecalho_pdf, st.session_state.erro, st.session_state.aliquota = t, p, r, c, err, aliquota
         st.session_state.tela_resultado = True
         st.rerun()
 else:
@@ -174,46 +169,54 @@ else:
     if st.session_state.erro:
         st.error(st.session_state.erro)
     else:
-        df_p = st.session_state.dados_finais
-        df_r = st.session_state.erros_registro
+        # SISTEMA DE ABAS
+        tab1, tab2, tab3 = st.tabs(["🔴 Acima do Teto (Divergências)", "🔍 Análise Completa (Todos os Itens)", "⚠️ Alertas de Registro"])
 
-        st.subheader("🚨 Preços Acima do Teto")
-        if df_p.empty: 
-            st.success("Tudo OK! Nenhum item com preço abusivo.")
-        else:
-            # AVISO IMPORTANTE PARA A EQUIPE
-            st.info("💡 **Atenção:** O pequeno ícone cinza que aparece no canto da tabela abaixo é um padrão do sistema que baixa o arquivo desconfigurado em CSV. Para extrair a tabela perfeita em Excel, role a tela e clique no botão azul gigante **'📥 Baixar Auditoria Completa (Excel)'**.")
-            
-            exib_p = df_p[['Col_Item', 'Col_Desc', 'V_Unit', 'PF_Num', 'Divisor', 'Teto_U', 'Diferenca']].copy()
-            exib_p.columns = ['Item', 'Descrição', 'Valor Proposta', 'PF CMED', 'Divisor', 'Teto Unit.', 'Diferença']
+        # ABA 1: DIVERGÊNCIAS
+        with tab1:
+            df_p = st.session_state.dados_finais
+            if df_p.empty: 
+                st.success("Tudo OK! Nenhum item com preço abusivo.")
+            else:
+                exib_p = df_p[['Col_Item', 'Col_Desc', 'V_Unit', 'PF_Num', 'Divisor', 'Teto_U', 'Diferenca']].copy()
+                exib_p.columns = ['Item', 'Descrição', 'Valor Proposta', 'PF CMED', 'Divisor', 'Teto Unit.', 'Diferença']
+                st.dataframe(
+                    exib_p.style.format({'Valor Proposta': 'R$ {:.4f}', 'PF CMED': 'R$ {:.4f}', 'Divisor': '{:.0f}', 'Teto Unit.': 'R$ {:.4f}', 'Diferença': 'R$ {:.4f}'}), 
+                    use_container_width=True
+                )
+
+        # ABA 2: TODOS OS ITENS (O SEGREDO PARA DESCOBRIR A FALHA)
+        with tab2:
+            df_t = st.session_state.dados_todos
+            st.info("Aqui estão todos os itens processados. Procure pelo Ácido Folínico e verifique as colunas **PF CMED**, **Divisor** e **Teto Unit.** para entender como o robô calculou.")
+            exib_t = df_t[['Col_Item', 'Col_Desc', 'V_Unit', 'PF_Num', 'Divisor', 'Teto_U', 'Diferenca', 'Status']].copy()
+            exib_t.columns = ['Item', 'Descrição', 'Valor Proposta', 'PF CMED', 'Divisor', 'Teto Unit.', 'Diferença', 'Status']
             st.dataframe(
-                exib_p.style.format({
-                    'Valor Proposta': 'R$ {:.4f}', 
-                    'PF CMED': 'R$ {:.4f}', 
-                    'Divisor': '{:.0f}', 
-                    'Teto Unit.': 'R$ {:.4f}', 
-                    'Diferença': 'R$ {:.4f}'
-                }), 
+                exib_t.style.format({'Valor Proposta': 'R$ {:.4f}', 'PF CMED': 'R$ {:.4f}', 'Divisor': '{:.0f}', 'Teto Unit.': 'R$ {:.4f}', 'Diferença': 'R$ {:.4f}'}), 
                 use_container_width=True
             )
 
-        st.divider()
-        st.subheader("⚠️ Alertas de Registro / Notificados")
-        if not df_r.empty:
-            st.dataframe(df_r[['Col_Item', 'Col_Desc', 'Col_Reg']], use_container_width=True)
+        # ABA 3: ALERTAS DE REGISTRO
+        with tab3:
+            df_r = st.session_state.erros_registro
+            if not df_r.empty:
+                st.dataframe(df_r[['Col_Item', 'Col_Desc', 'Col_Reg']], use_container_width=True)
+            else:
+                st.info("Nenhum alerta de registro.")
         
-        # O VERDADEIRO BOTÃO DE EXCEL (XLSX)
-        st.download_button("📥 Baixar Auditoria Completa (Excel)", exportar_excel(df_p, df_r), "Auditoria_Drogafonte.xlsx", use_container_width=True)
+        st.divider()
 
-        # GERADOR DE PDF
+        # O VERDADEIRO BOTÃO DE EXCEL (XLSX) - AGORA COM ABAS DENTRO DO EXCEL TAMBÉM
+        st.download_button("📥 Baixar Planilha Completa (Excel)", exportar_excel(st.session_state.dados_todos, st.session_state.dados_finais, st.session_state.erros_registro), "Auditoria_Diagnostico.xlsx", use_container_width=True)
+
+        # GERADOR DE PDF MANTIDO
         if st.button("📄 Gerar Relatório PDF Final", type="primary", use_container_width=True):
             pdf = FPDF(orientation='L', unit='mm', format='A4')
             
             if not df_p.empty:
                 pdf.add_page()
                 pdf.set_font("Arial", 'B', 9)
-                for h in st.session_state.cabecalho_pdf[:5]: 
-                    pdf.cell(0, 5, str(h).encode('latin-1', 'replace').decode('latin-1'), ln=True)
+                for h in st.session_state.cabecalho_pdf[:5]: pdf.cell(0, 5, str(h).encode('latin-1', 'replace').decode('latin-1'), ln=True)
                 pdf.ln(5)
                 
                 pdf.set_font("Arial", 'B', 14); pdf.set_text_color(180, 0, 0)
@@ -221,13 +224,9 @@ else:
                 pdf.ln(3)
                 
                 pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(230, 230, 230)
-                pdf.cell(15, 8, "Item", 1, 0, 'C', True)
-                pdf.cell(130, 8, "Descricao", 1, 0, 'C', True)
-                pdf.cell(25, 8, "Proposta", 1, 0, 'C', True)
-                pdf.cell(25, 8, "PF CMED", 1, 0, 'C', True)
-                pdf.cell(15, 8, "Div.", 1, 0, 'C', True)
-                pdf.cell(25, 8, "Teto", 1, 0, 'C', True)
-                pdf.cell(25, 8, "Dif.", 1, 1, 'C', True)
+                pdf.cell(15, 8, "Item", 1, 0, 'C', True); pdf.cell(130, 8, "Descricao", 1, 0, 'C', True)
+                pdf.cell(25, 8, "Proposta", 1, 0, 'C', True); pdf.cell(25, 8, "PF CMED", 1, 0, 'C', True)
+                pdf.cell(15, 8, "Div.", 1, 0, 'C', True); pdf.cell(25, 8, "Teto", 1, 0, 'C', True); pdf.cell(25, 8, "Dif.", 1, 1, 'C', True)
                 
                 pdf.set_font("Arial", '', 8)
                 for _, row in df_p.iterrows():
@@ -245,9 +244,7 @@ else:
                 pdf.cell(0, 10, "ALERTAS DE REGISTRO / PRODUTOS NOTIFICADOS", ln=True, align='C')
                 pdf.ln(5)
                 pdf.set_font("Arial", 'B', 8); pdf.set_fill_color(230, 230, 230)
-                pdf.cell(15, 8, "Item", 1, 0, 'C', True)
-                pdf.cell(190, 8, "Descricao", 1, 0, 'C', True)
-                pdf.cell(50, 8, "Registro", 1, 1, 'C', True)
+                pdf.cell(15, 8, "Item", 1, 0, 'C', True); pdf.cell(190, 8, "Descricao", 1, 0, 'C', True); pdf.cell(50, 8, "Registro", 1, 1, 'C', True)
                 
                 pdf.set_font("Arial", '', 8)
                 for _, row in df_r.iterrows():
