@@ -108,4 +108,22 @@ if uploaded_file is not None:
                         pdf.cell(35, 7, f"R$ {r['V_Unit']:.4f}", 1, 0, 'C')
                         pdf.cell(35, 7, f"R$ {r['Teto_U']:.4f}", 1, 0, 'C')
                         pdf.set_text_color(200, 0, 0)
-                        pdf.cell(35, 7, f"R$ {(r['V_Unit'] - r['Teto_U']):.4f}", 1, 1, 'C
+                        pdf.cell(35, 7, f"R$ {(r['V_Unit'] - r['Teto_U']):.4f}", 1, 1, 'C')
+                        pdf.set_text_color(0)
+
+                pdf_output = "Relatorio_Auditoria.pdf"
+                pdf.output(pdf_output)
+                
+                st.success("✅ Auditoria finalizada com sucesso!")
+                
+                with open(pdf_output, "rb") as f:
+                    st.download_button(
+                        label="📄 Baixar PDF Oficial",
+                        data=f,
+                        file_name="Auditoria_Drogafonte.pdf",
+                        mime="application/pdf",
+                        type="primary"
+                    )
+
+            except Exception as e:
+                st.error(f"Ocorreu um erro ao processar. Detalhe: {e}")
