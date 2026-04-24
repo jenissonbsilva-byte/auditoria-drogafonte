@@ -1,20 +1,17 @@
 import streamlit as st
 import pandas as pd
 import re
-import io
 import os
 from fpdf import FPDF
 
 # Configuração da Página
 st.set_page_config(page_title="Auditoria Drogafonte", page_icon="💊", layout="centered")
 
-# Cabeçalho Visual
-st.image("https://cdn-icons-png.flaticon.com/512/3024/3024310.png", width=80) # Ícone genérico (pode trocar pela logo depois)
+st.image("https://cdn-icons-png.flaticon.com/512/3024/3024310.png", width=80) 
 st.title("Portal de Auditoria - Drogafonte")
 st.markdown("Valide suas propostas contra o teto da **CMED** com processamento inteligente de fracionamento e doses.")
 st.divider()
 
-# Menu Lateral (Sidebar)
 st.sidebar.header("⚙️ Configurações")
 estado_destino = st.sidebar.selectbox(
     "Estado da Licitação:", 
@@ -23,7 +20,6 @@ estado_destino = st.sidebar.selectbox(
 )
 st.sidebar.info("A base da CMED é lida automaticamente do sistema. Suba apenas a sua proposta.")
 
-# Motor Matemático (O mesmo que validamos)
 def extrair_qtd_cmed(apres):
     apres = str(apres).upper()
     if "DOS" in apres: return 1
@@ -35,22 +31,22 @@ def extrair_qtd_cmed(apres):
     if m: return int(m.group(1))
     return 1
 
-def ler_proposta(file_buffer, nome_arq):
+# --- CORREÇÃO DO ERRO DE LEITURA AQUI ---
+def ler_proposta(file_buffer):
     try:
+        # Tenta ler como Excel verdadeiro
         return pd.read_excel(file_buffer, header=None)
     except:
+        # Se for um CSV disfarçado de XLS, lê com o motor nativo em latin1
         file_buffer.seek(0)
-        content = file_buffer.read().decode('latin1')
-        return pd.read_csv(io.StringIO(content), sep=None, engine='python', header=None)
+        return pd.read_csv(file_buffer, encoding='latin1', sep=',', header=None, on_bad_lines='skip')
 
-# Área de Upload
 uploaded_file = st.file_uploader("📥 Arraste sua proposta aqui (Excel ou arquivo do sistema)", type=['xls', 'xlsx', 'csv'])
 
 if uploaded_file is not None:
     if st.button("🚀 Executar Auditoria", use_container_width=True):
         with st.spinner('Lendo dados e cruzando com a Anvisa...'):
             try:
-                # 1. Lê CMED (O arquivo deve estar na mesma pasta no GitHub)
                 df_cmed = pd.read_excel('cmed_atual.xlsx')
                 df_cmed.columns = df_cmed.columns.astype(str).str.strip()
                 if 'REGISTRO' not in df_cmed.columns:
@@ -61,8 +57,7 @@ if uploaded_file is not None:
                             break
                 c_apres = [c for c in df_cmed.columns if 'APRESENTA' in str(c).upper()][0]
 
-                # 2. Lê Proposta
-                df_raw = ler_proposta(uploaded_file, uploaded_file.name)
+                df_raw = ler_proposta(uploaded_file)
                 linha_cab = 0
                 for i, row in df_raw.iterrows():
                     if row.astype(str).str.contains('Reg.M.S|Vlr. Unit.', case=False).any():
@@ -77,7 +72,6 @@ if uploaded_file is not None:
                 c_reg = [c for c in df_prop.columns if 'REG.M.S' in c.upper().replace(' ', '') or 'REGISTRO' in c.upper()][0]
                 c_vlr = [c for c in df_prop.columns if 'VLR' in c.upper() and 'UNIT' in c.upper()][0]
 
-                # 3. Cruzamento
                 df_prop['Reg_L'] = df_prop[c_reg].astype(str).str.replace(r'[^0-9]', '', regex=True)
                 df_cmed['Reg_C'] = df_cmed['REGISTRO'].astype(str).str.replace(r'[^0-9]', '', regex=True)
                 df_prop['V_Unit'] = df_prop[c_vlr].astype(str).str.replace(',', '.').astype(float)
@@ -88,7 +82,6 @@ if uploaded_file is not None:
                 df_m['Teto_U'] = df_m['PF_Num'] / df_m['Qtd_C']
                 df_erros = df_m[df_m['V_Unit'] > df_m['Teto_U']].copy()
 
-                # 4. Geração do PDF
                 pdf = FPDF(orientation='L', unit='mm', format='A4')
                 pdf.add_page()
                 pdf.set_font("Arial", 'B', 10)
@@ -115,23 +108,4 @@ if uploaded_file is not None:
                         pdf.cell(35, 7, f"R$ {r['V_Unit']:.4f}", 1, 0, 'C')
                         pdf.cell(35, 7, f"R$ {r['Teto_U']:.4f}", 1, 0, 'C')
                         pdf.set_text_color(200, 0, 0)
-                        pdf.cell(35, 7, f"R$ {(r['V_Unit'] - r['Teto_U']):.4f}", 1, 1, 'C')
-                        pdf.set_text_color(0)
-
-                # Salva o PDF na memória para o botão de download
-                pdf_output = "Relatorio_Auditoria.pdf"
-                pdf.output(pdf_output)
-                
-                st.success("✅ Auditoria finalizada com sucesso!")
-                
-                with open(pdf_output, "rb") as f:
-                    st.download_button(
-                        label="📄 Baixar PDF Oficial",
-                        data=f,
-                        file_name="Auditoria_Drogafonte.pdf",
-                        mime="application/pdf",
-                        type="primary"
-                    )
-
-            except Exception as e:
-                st.error(f"Ocorreu um erro ao processar. Detalhe: {e}")
+                        pdf.cell(35, 7, f"R$ {(r['V_Unit'] - r['Teto_U']):.4f}", 1, 1, 'C
