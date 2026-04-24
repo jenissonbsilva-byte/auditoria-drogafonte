@@ -8,26 +8,10 @@ import os
 # Configuração da página
 st.set_page_config(page_title="Auditoria Drogafonte - CMED", layout="wide")
 
-def limpar_registro(reg):
-    return re.sub(r'\D', '', str(reg))
+# --- MOTOR DE INTELIGÊNCIA DO COLAB IMPORTADO ---
 
-def buscar_cabecalho(df, colunas_alvo):
-    for i, row in df.iterrows():
-        # Blindagem: Força tudo a virar texto (str) antes de aplicar maiúsculo
-        row_str = [str(val).upper().strip() for val in row.tolist()]
-        if any(str(col).upper() in row_str for col in colunas_alvo):
-            return i
-    return None
-
-def limpar_nome_coluna(col):
-    """Padroniza os nomes das colunas da CMED para evitar erros de espaços da Anvisa"""
-    nome = str(col).upper().strip()
-    nome = re.sub(r'\s+', ' ', nome)
-    nome = nome.replace(" %", "%")
-    return nome
-
-# NOVA FUNÇÃO: Trazida do Colab - Extração agressiva de quantidades
 def extrair_qtd_cmed(apres):
+    """Expressões Regulares do Colab para não errar a quantidade da caixa da CMED"""
     apres = str(apres).upper()
     if "DOS" in apres: return 1
     # Escudo para não fracionar Soro, Injetáveis e Cremes (ML, MG, G)
@@ -39,115 +23,97 @@ def extrair_qtd_cmed(apres):
     if m: return int(m.group(1))
     return 1
 
-# NOVA FUNÇÃO: Leitor robusto para lidar com falsos .xls gerados por ERPs
 def ler_proposta_robusto(file_obj):
+    """Leitura à prova de falhas para arquivos gerados por ERPs"""
     try:
         df = pd.read_excel(file_obj, header=None)
         return df
     except:
         try:
-            file_obj.seek(0) # Retorna o ponteiro do arquivo para o início
+            file_obj.seek(0)
             content = file_obj.read().decode('latin1')
             df = pd.read_csv(io.StringIO(content), sep=None, engine='python', header=None)
             return df
         except Exception as e:
-            raise Exception(f"Não foi possível ler o arquivo da proposta. Verifique se o formato é válido. Erro: {e}")
+            raise Exception(f"Formato de arquivo inválido ou corrompido. Erro: {e}")
 
-# Cache para carregar a CMED apenas uma vez
 @st.cache_data
 def carregar_cmed():
+    """Carregamento inteligente da CMED adaptado do Colab"""
     if os.path.exists('cmed_atual.xlsx'):
         df_raw = pd.read_excel('cmed_atual.xlsx', header=None)
-        idx_cabecalho = buscar_cabecalho(df_raw, ['REGISTRO', 'CÓDIGO GGREM', 'SUBSTÂNCIA'])
         
-        if idx_cabecalho is not None:
-            df = pd.read_excel('cmed_atual.xlsx', skiprows=idx_cabecalho)
-        else:
-            df = pd.read_excel('cmed_atual.xlsx')
-            
-        df.columns = [limpar_nome_coluna(c) for c in df.columns]
-            
-        colunas_cmed = {
-            'REGISTRO': ['REGISTRO', 'Nº REGISTRO', 'REGISTRO MS', 'NO REGISTRO'],
-            'APRESENTAÇÃO': ['APRESENTAÇÃO', 'APRESENTACAO', 'DESCRICAO_CMED']
-        }
-        
-        for oficial, variantes in colunas_cmed.items():
-            for v in variantes:
-                if v in df.columns:
-                    idx = list(df.columns).index(v)
-                    df.rename(columns={df.columns[idx]: oficial}, inplace=True)
-                    break
-        return df
-    else:
-        return None
+        linha_cab = 0
+        for i, row in df_raw.iterrows():
+            if row.astype(str).str.contains('REGISTRO', case=False).any():
+                linha_cab = i
+                break
+                
+        df_cmed = pd.read_excel('cmed_atual.xlsx', skiprows=linha_cab)
+        # Padroniza as colunas de porcentagem ("PF 20,5 %" -> "PF 20,5%") para não haver erros de busca
+        df_cmed.columns = df_cmed.columns.astype(str).str.replace(' %', '%').str.strip()
+        return df_cmed
+    return None
 
 def processar_dados(file_proposta, df_cmed, coluna_icms):
     try:
-        # Usa o leitor robusto que não quebra com falsos XLS
+        # 1. Leitura
         df_raw = ler_proposta_robusto(file_proposta)
-        idx_cabecalho = buscar_cabecalho(df_raw, ['Reg.M.S', 'Registro MS', 'REG. MS', 'Registro'])
         
-        if idx_cabecalho is None:
-            return None, "Cabeçalho 'Reg.M.S' não identificado na proposta."
+        # 2. Busca do Cabeçalho e Extração de Metadados (Igual ao Colab para o PDF)
+        linha_cab = 0
+        for i, row in df_raw.iterrows():
+            if row.astype(str).str.contains('Reg.M.S|Vlr. Unit.', case=False).any():
+                linha_cab = i
+                break
+                
+        cabecalho_info = [
+            " ".join(df_raw.iloc[j].dropna().astype(str).tolist()) 
+            for j in range(linha_cab) if str(df_raw.iloc[j].dropna()).strip()
+        ]
 
-        # Fatiamento do DataFrame sem precisar ler o arquivo de novo
-        df_prop = df_raw.iloc[idx_cabecalho+1:].copy()
-        df_prop.columns = df_raw.iloc[idx_cabecalho].astype(str).str.strip()
+        # 3. Reconstrói a Proposta com as colunas corretas
+        df_prop = df_raw.iloc[linha_cab+1:].copy()
+        df_prop.columns = df_raw.iloc[linha_cab].astype(str).str.strip()
         
-        # Inclusão das variações de descrição vistas no Colab ('Nome Comercial', 'D i s c r i m i n a ç ã o')
-        colunas_prop = {
-            'Reg.M.S': ['Reg.M.S', 'REG. MS', 'Registro MS', 'Registro'],
-            'Vlr. Unit.': ['Vlr. Unit.', 'Valor Unitário', 'Preço Unit.', 'Unitário', 'Vlr.Unit'],
-            'Descrição': ['Descrição', 'PRODUTO', 'Item', 'NOME DO PRODUTO', 'Descricao', 'Nome Comercial', 'D i s c r i m i n a ç ã o']
-        }
+        # 4. Mapeamento Dinâmico de Colunas
+        c_desc = [c for c in df_prop.columns if 'D i s c' in str(c) or 'Nome Com' in str(c) or 'Descrição' in str(c) or 'PRODUTO' in str(c).upper()][0]
+        c_reg = [c for c in df_prop.columns if 'REG.M.S' in str(c).upper().replace(' ', '') or 'REGISTRO' in str(c).upper()][0]
+        c_vlr = [c for c in df_prop.columns if 'VLR' in str(c).upper() and 'UNIT' in str(c).upper()][0]
         
-        # Mapeamento e renomeação
-        for oficial, variantes in colunas_prop.items():
-            for v in variantes:
-                # Busca flexível por parte do nome (como no Colab)
-                match = [c for c in df_prop.columns if v.upper().replace(' ', '') in str(c).upper().replace(' ', '')]
-                if match:
-                    df_prop.rename(columns={match[0]: oficial}, inplace=True)
-                    break
+        try:
+            c_item = [c for c in df_prop.columns if 'ITEM' in str(c).upper()][0]
+        except IndexError:
+            df_prop['Item'] = range(1, len(df_prop) + 1)
+            c_item = 'Item'
 
-        if 'Reg.M.S' not in df_prop.columns or 'Vlr. Unit.' not in df_prop.columns:
-            return None, f"Colunas essenciais da proposta não identificadas."
-        
-        if 'REGISTRO' not in df_cmed.columns:
-            return None, "Coluna de Registro não encontrada na CMED."
+        c_apres_cmed = [c for c in df_cmed.columns if 'APRESENTA' in str(c).upper()][0]
 
-        if coluna_icms not in df_cmed.columns:
-            cols_pf = [c for c in df_cmed.columns if 'PF' in c]
-            return None, f"A coluna '{coluna_icms}' não foi encontrada na CMED. Colunas lidas: {cols_pf}"
+        # 5. Cruzamento de Dados e Auditoria Matemática
+        df_prop['Reg_L'] = df_prop[c_reg].astype(str).str.replace(r'[^0-9]', '', regex=True)
+        df_cmed['Reg_C'] = df_cmed['REGISTRO'].astype(str).str.replace(r'[^0-9]', '', regex=True)
+        df_prop['V_Unit'] = df_prop[c_vlr].astype(str).str.replace(',', '.').astype(float)
 
-        df_prop['REG_LIMPO'] = df_prop['Reg.M.S'].apply(limpar_registro)
-        df_cmed_copy = df_cmed.copy()
-        df_cmed_copy['REG_LIMPO'] = df_cmed_copy['REGISTRO'].apply(limpar_registro)
+        # Merge Left garante que os dados da proposta não se percam na leitura
+        df_m = pd.merge(df_prop, df_cmed[['Reg_C', coluna_icms, c_apres_cmed]], left_on='Reg_L', right_on='Reg_C', how='left')
         
-        resultado = pd.merge(df_prop, df_cmed_copy, on='REG_LIMPO', how='inner')
+        df_m['PF_Num'] = df_m[coluna_icms].astype(str).str.replace(',', '.').astype(float)
+        df_m['Qtd_C'] = df_m[c_apres_cmed].apply(extrair_qtd_cmed)
+        df_m['Teto_U'] = df_m['PF_Num'] / df_m['Qtd_C']
         
-        # Aplicação da matemática correta (igual ao Colab)
-        def calcular_teto(row):
-            qtd = extrair_qtd_cmed(row['APRESENTAÇÃO'])
-            pf = str(row[coluna_icms]).replace(',', '.') if isinstance(row[coluna_icms], str) else row[coluna_icms]
-            return float(pf) / qtd
+        # Filtra apenas quem ultrapassou o teto
+        df_erros = df_m[df_m['V_Unit'] > df_m['Teto_U']].copy()
 
-        resultado['Teto_Unitario'] = resultado.apply(calcular_teto, axis=1)
-        
-        resultado['Vlr. Unit.'] = resultado['Vlr. Unit.'].apply(
-            lambda x: float(str(x).replace(',', '.')) if isinstance(x, str) else x
-        )
-        
-        # Removida a tolerância de erro de arredondamento para ficar rigorosamente igual ao Colab
-        acima = resultado[resultado['Vlr. Unit.'] > resultado['Teto_Unitario']].copy()
-        
-        return acima, None
+        # Passa os metadados visuais para a geração da tabela e do PDF
+        df_erros['Item_View'] = df_erros[c_item]
+        df_erros['Desc_View'] = df_erros[c_desc]
+
+        return df_erros, cabecalho_info, None
 
     except Exception as e:
-        return None, f"Erro no Processamento: {str(e)}"
+        return None, None, f"Erro Crítico: {str(e)}"
 
-# --- INTERFACE ---
+# --- INTERFACE VISUAL ---
 st.title("🛡️ Auditoria Drogafonte - Validador CMED")
 st.markdown("---")
 
@@ -161,75 +127,101 @@ with st.sidebar:
     
     st.header("Configurações")
     
-    opcoes_icms = {
-        "PF 12%": "PF 12%",
-        "PF 17%": "PF 17%",
-        "PF 17,5%": "PF 17,5%",
-        "PF 18%": "PF 18%",
-        "PF 19%": "PF 19%",
-        "PF 19,5%": "PF 19,5%",
-        "PF 20%": "PF 20%",
-        "PF 20,5% (Pernambuco)": "PF 20,5%",
-        "PF 21%": "PF 21%",
-        "PF 22%": "PF 22%"
-    }
+    opcoes_icms = [
+        "PF 12%", "PF 17%", "PF 17,5%", "PF 18%", "PF 19%", 
+        "PF 19,5%", "PF 20%", "PF 20,5%", "PF 21%", "PF 22%"
+    ]
     
-    escolha_icms = st.selectbox("Selecione a Alíquota ICMS (Destino):", list(opcoes_icms.keys()), index=7)
-    coluna_icms_real = opcoes_icms[escolha_icms]
+    escolha_icms = st.selectbox("Selecione a Alíquota ICMS (Destino):", opcoes_icms, index=7) # 7 = PF 20,5%
 
     st.markdown("---")
-    st.header("Status do Sistema")
     if df_cmed is not None:
         st.success("✅ Base CMED Ativa")
     else:
-        st.error("❌ Arquivo 'cmed_atual.xlsx' não encontrado.")
+        st.error("❌ Arquivo 'cmed_atual.xlsx' não encontrado na nuvem.")
 
 if df_cmed is not None:
     upload_prop = st.file_uploader("Arraste a Proposta (Excel) aqui", type=['xls', 'xlsx'])
 
     if upload_prop:
-        with st.spinner(f"Analisando proposta com base no {escolha_icms}..."):
-            dados_finais, erro = processar_dados(upload_prop, df_cmed, coluna_icms_real)
+        with st.spinner(f"Processando com motor lógico Colab ({escolha_icms})..."):
+            dados_finais, cabecalho_pdf, erro = processar_dados(upload_prop, df_cmed, escolha_icms)
             
             if erro:
                 st.error(erro)
             elif dados_finais.empty:
-                st.success(f"✅ Tudo certo! Nenhum item acima da CMED para a alíquota {escolha_icms}.")
+                st.success(f"✅ PROPOSTA AUDITADA: 100% DENTRO DOS TETOS LEGAIS PARA {escolha_icms}.")
             else:
-                st.warning(f"🚨 {len(dados_finais)} itens com valor acima do teto ({escolha_icms})!")
+                st.warning(f"🚨 {len(dados_finais)} itens ultrapassaram o teto legal!")
                 
-                exibicao = dados_finais[['Descrição', 'Reg.M.S', 'Vlr. Unit.', 'Teto_Unitario']].copy()
-                exibicao.columns = ['Item', 'Registro MS', 'Preço Proposta', f'Teto CMED ({escolha_icms})']
-                
-                st.dataframe(exibicao.style.format({
-                    'Preço Proposta': 'R$ {:.4f}', 
-                    f'Teto CMED ({escolha_icms})': 'R$ {:.4f}'
-                }))
+                # Exibição na tela do Streamlit
+                exibicao = dados_finais[['Item_View', 'Desc_View', 'V_Unit', 'Teto_U']].copy()
+                exibicao.columns = ['Item', 'Descrição do Medicamento', 'Valor Proposta', 'Teto CMED']
+                st.dataframe(exibicao.style.format({'Valor Proposta': 'R$ {:.4f}', 'Teto CMED': 'R$ {:.4f}'}))
 
-                if st.button("📥 Baixar Relatório em PDF"):
-                    pdf = FPDF()
+                # --- GERAÇÃO EXATA DO PDF (IGUAL AO MODELO ENVIADO) ---
+                if st.button("📥 Baixar Relatório Profissional (PDF)"):
+                    # Formato Paisagem (L) igual ao Colab para caber a descrição
+                    pdf = FPDF(orientation='L', unit='mm', format='A4')
                     pdf.add_page()
-                    pdf.set_font("Arial", 'B', 14)
-                    pdf.cell(190, 10, "DROGAFONTE - RELATORIO DE AUDITORIA CMED", 0, 1, 'C')
-                    pdf.set_font("Arial", '', 9)
-                    pdf.cell(190, 7, f"Arquivo: {upload_prop.name} | Aliquota: {escolha_icms}", 0, 1, 'C')
+                    
+                    # 1. Cabeçalho Dinâmico da Drogafonte/Licitação
+                    pdf.set_font("Arial", 'B', 10)
+                    for linha in cabecalho_pdf[:5]:
+                        # Limpa caracteres estranhos para evitar erros no FPDF
+                        texto_limpo = str(linha).encode('latin-1', 'replace').decode('latin-1')
+                        pdf.cell(0, 5, texto_limpo, ln=True)
+                    
+                    # Linha divisória cinza
+                    pdf.ln(5)
+                    pdf.set_draw_color(180)
+                    pdf.line(10, pdf.get_y(), 287, pdf.get_y())
                     pdf.ln(5)
                     
-                    pdf.set_font("Arial", 'B', 8)
-                    pdf.set_fill_color(230, 230, 230)
-                    pdf.cell(90, 8, "Item/Descricao", 1, 0, 'L', True)
-                    pdf.cell(33, 8, "Vlr. Proposta", 1, 0, 'C', True)
-                    pdf.cell(33, 8, "Teto CMED", 1, 0, 'C', True)
-                    pdf.cell(34, 8, "Diferenca", 1, 1, 'C', True)
-                    
-                    pdf.set_font("Arial", '', 7)
-                    for _, r in dados_finais.iterrows():
-                        desc = str(r['Descrição'])[:55].encode('latin-1', 'replace').decode('latin-1')
-                        pdf.cell(90, 7, desc, 1)
-                        pdf.cell(33, 7, f"R$ {r['Vlr. Unit.']:.4f}", 1, 0, 'C')
-                        pdf.cell(33, 7, f"R$ {r['Teto_Unitario']:.4f}", 1, 0, 'C')
-                        diff = r['Vlr. Unit.'] - r['Teto_Unitario']
-                        pdf.cell(34, 7, f"R$ {diff:.4f}", 1, 1, 'C')
+                    # 2. Título Centralizado em Vermelho
+                    pdf.set_font("Arial", 'B', 14)
+                    pdf.set_text_color(200, 0, 0)
+                    pdf.cell(0, 10, f"RELATÓRIO DE DIVERGÊNCIAS CMED - DESTINO: {escolha_icms}", ln=True, align='C')
+                    pdf.ln(5)
 
+                    # 3. Cabeçalho da Tabela
+                    pdf.set_font("Arial", 'B', 8)
+                    pdf.set_text_color(0) # Retorna texto para preto
+                    pdf.set_fill_color(240, 240, 240) # Fundo Cinza Claro
+                    
+                    # Larguras exatas do Colab
+                    pdf.cell(10, 8, "Item", 1, 0, 'C', True)
+                    pdf.cell(125, 8, "Descrição do Medicamento", 1, 0, 'C', True)
+                    pdf.cell(35, 8, "Valor Proposta", 1, 0, 'C', True)
+                    pdf.cell(35, 8, "Teto CMED", 1, 0, 'C', True)
+                    pdf.cell(35, 8, "Diferença", 1, 1, 'C', True)
+                    
+                    # 4. Dados da Tabela
+                    pdf.set_font("Arial", '', 8)
+                    for _, r in dados_finais.iterrows():
+                        # Item
+                        item_str = str(r['Item_View']).split('.')[0] if '.' in str(r['Item_View']) else str(r['Item_View'])
+                        pdf.cell(10, 7, item_str, 1, 0, 'C')
+                        
+                        # Descrição Limitada e Padronizada
+                        desc = str(r['Desc_View'])[:75].encode('latin-1', 'replace').decode('latin-1')
+                        pdf.cell(125, 7, desc, 1)
+                        
+                        # Preços
+                        pdf.cell(35, 7, f"R$ {r['V_Unit']:.4f}", 1, 0, 'C')
+                        pdf.cell(35, 7, f"R$ {r['Teto_U']:.4f}", 1, 0, 'C')
+                        
+                        # Diferença em Vermelho (matemática igual ao Colab)
+                        diferenca = r['V_Unit'] - r['Teto_U']
+                        pdf.set_text_color(200, 0, 0) # Fica Vermelho
+                        pdf.cell(35, 7, f"R$ {diferenca:.4f}", 1, 1, 'C')
+                        pdf.set_text_color(0) # Volta pro preto para a próxima linha
+
+                    # Baixar Arquivo
                     pdf_output = pdf.output(dest='S').encode('latin-1')
-                    st.download_button("Clique aqui para salvar o PDF", data=pdf_output, file_name="auditoria_cmed.pdf", mime="application/pdf")
+                    st.download_button(
+                        "Clique aqui para salvar o Relatório PDF", 
+                        data=pdf_output, 
+                        file_name="Relatorio_Auditoria_Drogafonte.pdf", 
+                        mime="application/pdf"
+                    )
