@@ -17,33 +17,32 @@ def resetar_app():
     for key in ['dados_finais', 'erros_registro', 'cabecalho_pdf', 'erro', 'aliquota']:
         if key in st.session_state: del st.session_state[key]
 
-# --- MOTOR DE INTELIGÊNCIA DE DIVISORES ---
+# --- MOTOR DE INTELIGÊNCIA DE DIVISORES (REGRA ATUALIZADA) ---
 def extrair_divisor_inteligente(apres_cmed, unid_proposta):
     apres_cmed = str(apres_cmed).upper()
     unid_proposta = str(unid_proposta).upper().strip()
 
-    # 1. Se for Caixa ou Dose -> Divisor 1
+    # 1. Se for Caixa (CX) ou Dose (DOS) -> Mantém preço integral
     if any(x in unid_proposta for x in ["CX", "CAIXA", "DOS", "DOSE"]):
         return 1
 
-    # 2. Se for ML -> Divisor é a milhagem
-    if unid_proposta == "ML":
-        m = re.search(r'(\d+)\s*ML', apres_cmed)
-        return float(m.group(1)) if m else 1
-
-    # 3. Se for Cartela (CAR) -> Divisor é a quantidade na cartela
+    # 2. Se for Cartela (CAR) -> Divide pela quantidade na cartela (ex: 1 X 21)
     if "CAR" in unid_proposta:
         m = re.search(r'(\d+)\s*X\s*(\d+)', apres_cmed)
         return float(m.group(2)) if m else 1
 
-    # 4. PADRÃO: CONSIDERAR UNIDADE (Se não for nenhum dos acima)
-    # Busca por padrões de multiplicação na CMED (ex: 3 BLISTERS X 10 ou CX X 30)
+    # 3. PADRÃO: CONSIDERAR UNIDADE (Para ML, CPR, AMP, UN, etc)
+    # O robô vasculha a CMED para descobrir o total de unidades na caixa
+    
+    # Padrão: 3 BLISTERS X 10 ou 10 FRASCOS X 5ML
     m = re.search(r'\b(\d+)\s+(?:BL|ENV|STRIP|CPR|CAP|AMP|FA|FR|SER).*?X\s+(\d+)\b', apres_cmed)
     if m: return float(m.group(1)) * float(m.group(2))
     
+    # Padrão: CX X 30
     m = re.search(r'X\s+(\d+)\b(?!\s*(?:ML|MG|G|MCG|UI))', apres_cmed)
     if m: return float(m.group(1))
     
+    # Padrão: CT C/ 20
     m = re.search(r'(?:C/|CT|CX)\s*(\d+)\b', apres_cmed)
     return float(m.group(1)) if m else 1
 
@@ -119,7 +118,7 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
     except Exception as e:
         return None, None, None, f"Erro: {str(e)}"
 
-# --- INTERFACE ---
+# --- INTERFACE STREAMLIT ---
 df_cmed = carregar_cmed()
 with st.sidebar:
     try:
@@ -144,34 +143,30 @@ else:
     if st.session_state.erro:
         st.error(st.session_state.erro)
     else:
-        # --- TABELA 1: DIVERGÊNCIAS ---
+        # Tabela de Preços
         st.subheader("🚨 Preços Acima do Teto")
         df_p = st.session_state.dados_finais
         if df_p.empty:
             st.success("Nenhuma divergência encontrada.")
         else:
-            st.dataframe(df_p[['Col_Item', 'Col_Desc', 'V_Unit', 'Teto_U', 'Diferenca']].style.format({'V_Unit': '{:.4f}', 'Teto_U': '{:.4f}', 'Diferenca': '{:.4f}'}), use_container_width=True)
-            st.download_button("📥 Baixar Divergências (Excel)", exportar_excel(df_p), "Divergencias.xlsx")
+            st.dataframe(df_p[['Col_Item', 'Col_Desc', 'V_Unit', 'Teto_U', 'Diferenca']].style.format('{:.4f}'), use_container_width=True)
+            st.download_button("📥 Exportar Divergências (Excel)", exportar_excel(df_p), "Divergencias.xlsx")
 
         st.divider()
 
-        # --- TABELA 2: REGISTROS ---
-        st.subheader("⚠️ Alertas de Registro")
+        # Alertas de Registro
         df_r = st.session_state.erros_registro
         if not df_r.empty:
+            st.subheader("⚠️ Alertas de Registro")
             st.dataframe(df_r[['Col_Item', 'Col_Desc', 'Col_Reg']], use_container_width=True)
-            st.download_button("📥 Baixar Alertas de Registro (Excel)", exportar_excel(df_r), "Alertas_Registro.xlsx")
+            st.download_button("📥 Exportar Alertas (Excel)", exportar_excel(df_r), "Alertas_Registro.xlsx")
 
-        # --- GERADOR DE PDF ---
-        if st.button("📄 Gerar Relatório PDF Unificado", type="primary", use_container_width=True):
+        # Botão PDF
+        if st.button("📄 Gerar Relatório PDF Final", type="primary", use_container_width=True):
             pdf = FPDF(orientation='L', unit='mm', format='A4')
             
-            # PÁGINA 1: PREÇOS
+            # Página 1: Preços
             pdf.add_page()
-            pdf.set_font("Arial", 'B', 10)
-            for h in st.session_state.cabecalho_pdf[:4]: 
-                pdf.cell(0, 5, str(h).encode('latin-1', 'replace').decode('latin-1'), ln=True)
-            pdf.ln(5)
             pdf.set_font("Arial", 'B', 14); pdf.set_text_color(180, 0, 0)
             pdf.cell(0, 10, f"DIVERGENCIAS DE PRECO - {st.session_state.aliquota}", ln=True, align='C')
             pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(230, 230, 230)
@@ -188,20 +183,17 @@ else:
                 pdf.cell(30, 7, f"{r['Teto_U']:.4f}", 1, 0, 'C')
                 pdf.cell(30, 7, f"{r['Diferenca']:.4f}", 1, 1, 'C')
 
-            # PÁGINA 2: REGISTROS
+            # Página 2: Registros
             if not df_r.empty:
                 pdf.add_page()
-                pdf.set_font("Arial", 'B', 14); pdf.set_text_color(0)
-                pdf.cell(0, 10, "ALERTAS DE REGISTRO E PRODUTOS NOTIFICADOS", ln=True, align='C')
+                pdf.set_font("Arial", 'B', 14); pdf.cell(0, 10, "ALERTAS DE REGISTRO / NOTIFICADOS", ln=True, align='C')
                 pdf.ln(5)
                 pdf.set_font("Arial", 'B', 8); pdf.set_fill_color(230, 230, 230)
-                pdf.cell(15, 8, "Item", 1, 0, 'C', True)
-                pdf.cell(190, 8, "Descricao", 1, 0, 'C', True)
-                pdf.cell(50, 8, "Registro", 1, 1, 'C', True)
+                pdf.cell(15, 8, "Item", 1, 0, 'C', True); pdf.cell(190, 8, "Descricao", 1, 0, 'C', True); pdf.cell(50, 8, "Registro", 1, 1, 'C', True)
                 pdf.set_font("Arial", '', 8)
                 for _, r in df_r.iterrows():
                     pdf.cell(15, 7, str(r['Col_Item']), 1, 0, 'C')
                     pdf.cell(190, 7, str(r['Col_Desc'])[:110].encode('latin-1', 'replace').decode('latin-1'), 1)
                     pdf.cell(50, 7, str(r['Col_Reg']), 1, 1, 'C')
 
-            st.download_button("💾 Baixar PDF do Relatório", pdf.output(dest='S').encode('latin-1'), "Relatorio_Auditoria.pdf", "application/pdf")
+            st.download_button("💾 Baixar PDF", pdf.output(dest='S').encode('latin-1'), "Relatorio_Drogafonte.pdf", "application/pdf")
