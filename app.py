@@ -13,7 +13,7 @@ if os.path.exists("logo_drogafonte.png"):
     st.image("logo_drogafonte.png", width=250)
 
 st.title("Portal de Auditoria - Drogafonte")
-st.markdown("Valide suas propostas contra o teto da **CMED** com inteligência de fracionamento.")
+st.markdown("Valide suas propostas contra o teto da **CMED**.")
 st.divider()
 
 # 3. CONFIGURAÇÕES LATERAIS
@@ -27,7 +27,7 @@ estado_destino = st.sidebar.selectbox(
     index=6
 )
 
-# 4. FUNÇÕES DE APOIO
+# 4. FUNÇÕES DE APOIO (FRACIONAMENTO)
 def extrair_qtd_cmed(apres):
     apres = str(apres).upper()
     if "DOS" in apres: return 1
@@ -40,16 +40,15 @@ def extrair_qtd_cmed(apres):
     return 1
 
 def ler_proposta_robusto(file_buffer):
-    # Tenta ler como Excel real primeiro
     try:
+        # Tenta ler como Excel real
         return pd.read_excel(file_buffer, header=None)
-    except Exception:
-        # Fallback para CSV/TXT (muitos arquivos .xls de ERP são na verdade CSVs)
+    except:
+        # Fallback para CSV/TXT (arquivos .xls gerados por ERP)
         file_buffer.seek(0)
         try:
             return pd.read_csv(file_buffer, encoding='latin1', sep=None, engine='python', header=None, on_bad_lines='skip')
         except:
-            st.error("Não foi possível decodificar o arquivo. Certifique-se de que é um Excel ou CSV válido.")
             return None
 
 # 5. ÁREA DE UPLOAD
@@ -60,42 +59,38 @@ if uploaded_file is not None:
         with st.spinner('Cruzando dados com a base da Anvisa...'):
             try:
                 # Carregar Base CMED
-                if not os.path.exists('cmed_atual.xlsx'):
-                    st.error("Arquivo 'cmed_atual.xlsx' não encontrado no repositório GitHub.")
-                    st.stop()
-
                 df_cmed = pd.read_excel('cmed_atual.xlsx')
                 df_cmed.columns = df_cmed.columns.astype(str).str.strip()
                 
-                # Localizar cabeçalho da CMED
                 if 'REGISTRO' not in df_cmed.columns:
                     for i, r in pd.read_excel('cmed_atual.xlsx', header=None).iterrows():
-                        if r.astype(str).str.contains('REGISTRO').any():
+                        if r.astype(str).str.contains('REGISTRO', case=False).any():
                             df_cmed = pd.read_excel('cmed_atual.xlsx', skiprows=i)
                             df_cmed.columns = df_cmed.columns.astype(str).str.strip()
                             break
                 
-                lista_col_apres = [c for c in df_cmed.columns if 'APRESENTA' in str(c).upper()]
-                if not lista_col_apres:
-                    st.error("Coluna de 'Apresentação' não encontrada na tabela CMED.")
-                    st.stop()
-                c_apres_cmed = lista_col_apres[0]
+                c_apres_cmed = [c for c in df_cmed.columns if 'APRESENTA' in str(c).upper()][0]
 
                 # Processar Proposta
                 df_raw = ler_proposta_robusto(uploaded_file)
-                if df_raw is None: st.stop()
+                if df_raw is None: st.error("Erro ao ler o arquivo."); st.stop()
                 
-                # Localizar linha do cabeçalho na proposta de forma segura
+                # BUSCA ULTRA-RESILIENTE DE CABEÇALHO
                 linha_cab = 0
-                achou_cabecalho = False
+                achou = False
                 for i, row in df_raw.iterrows():
-                    if row.astype(str).str.contains('Reg.M.S|Vlr. Unit.', case=False).any():
+                    celulas = row.astype(str).str.upper().tolist()
+                    # Procura por indícios de Registro E Valor Unitário na mesma linha
+                    tem_reg = any('REG' in c or 'M.S' in c for c in celulas)
+                    tem_vlr = any('VLR' in c or 'UNIT' in c or 'PREÇO' in c for c in celulas)
+                    
+                    if tem_reg and tem_vlr:
                         linha_cab = i
-                        achou_cabecalho = True
+                        achou = True
                         break
                 
-                if not achou_cabecalho:
-                    st.error("Cabeçalho da Proposta (Reg.M.S / Vlr. Unit.) não identificado.")
+                if not achou:
+                    st.error("Não encontramos as colunas de 'Registro' ou 'Valor' na sua planilha. Verifique se o arquivo está correto.")
                     st.stop()
 
                 cabecalho_pdf = [" ".join(df_raw.iloc[j].dropna().astype(str).tolist()) for j in range(linha_cab) if str(df_raw.iloc[j].dropna()).strip()]
@@ -103,14 +98,10 @@ if uploaded_file is not None:
                 df_prop = df_raw.iloc[linha_cab+1:].copy()
                 df_prop.columns = df_raw.iloc[linha_cab].astype(str).str.strip()
 
-                # Busca de colunas de forma segura (Prevenção de 'index out of range')
-                def get_col(df, keywords, default_idx):
-                    found = [c for c in df.columns if any(k.upper() in str(c).upper() for k in keywords)]
-                    return found[0] if found else df.columns[default_idx]
-
-                c_desc = get_col(df_prop, ['D i s c', 'Descrição', 'PRODUTO', 'Nome'], 2)
-                c_reg = get_col(df_prop, ['REG.M.S', 'REGISTRO', 'MS'], 6)
-                c_vlr = get_col(df_prop, ['VLR', 'UNIT', 'PREÇO'], 9)
+                # Identificar colunas finais
+                c_desc = [c for c in df_prop.columns if any(x in str(c).upper() for x in ['DISC', 'DESC', 'NOME', 'PROD'])][0]
+                c_reg = [c for c in df_prop.columns if any(x in str(c).upper() for x in ['REG', 'M.S', 'MS'])][0]
+                c_vlr = [c for c in df_prop.columns if any(x in str(c).upper() for x in ['VLR', 'UNIT', 'PREÇO'])][0]
 
                 # Cálculos
                 df_prop['Reg_L'] = df_prop[c_reg].astype(str).str.replace(r'[^0-9]', '', regex=True)
@@ -124,10 +115,9 @@ if uploaded_file is not None:
                 
                 df_erros = df_m[df_m['V_Unit'] > (df_m['Teto_U'] + 0.0001)].copy()
 
-                # 6. GERAÇÃO DO PDF
+                # GERAÇÃO DO PDF
                 pdf = FPDF(orientation='L', unit='mm', format='A4')
                 pdf.add_page()
-                
                 if os.path.exists("logo_drogafonte.png"):
                     pdf.image("logo_drogafonte.png", 10, 8, 40)
                     pdf.ln(15)
@@ -142,12 +132,12 @@ if uploaded_file is not None:
 
                 if df_erros.empty:
                     pdf.set_font("Arial", 'B', 16); pdf.set_text_color(0, 120, 0)
-                    pdf.cell(0, 30, "✅ PROPOSTA AUDITADA: TODOS OS ITENS DENTRO DO TETO.", ln=True, align='C')
+                    pdf.cell(0, 30, "✅ PROPOSTA AUDITADA: 100% OK.", ln=True, align='C')
                 else:
                     pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(240)
                     pdf.cell(12, 8, "Item", 1, 0, 'C', True)
-                    pdf.cell(128, 8, "Descrição do Medicamento", 1, 0, 'C', True)
-                    pdf.cell(34, 8, "Vlr. Proposta", 1, 0, 'C', True)
+                    pdf.cell(128, 8, "Descrição", 1, 0, 'C', True)
+                    pdf.cell(34, 8, "Sua Proposta", 1, 0, 'C', True)
                     pdf.cell(34, 8, "Teto CMED", 1, 0, 'C', True)
                     pdf.cell(34, 8, "Diferença", 1, 1, 'C', True)
                     
@@ -161,15 +151,13 @@ if uploaded_file is not None:
                         pdf.cell(34, 7, f"R$ {(r['V_Unit'] - r['Teto_U']):.4f}", 1, 1, 'C')
                         pdf.set_text_color(0)
 
-                pdf_file = "Auditoria_Drogafonte.pdf"
+                pdf_file = "Auditoria_Final.pdf"
                 pdf.output(pdf_file)
-
                 st.success("Auditoria Concluída!")
                 with open(pdf_file, "rb") as f:
-                    st.download_button("📩 Baixar Relatório de Divergências (PDF)", f, file_name=pdf_file, mime="application/pdf", type="primary")
+                    st.download_button("📩 Baixar PDF de Divergências", f, file_name=pdf_file, mime="application/pdf", type="primary")
 
             except Exception as e:
                 st.error(f"Erro de Processamento: {e}")
 
-# Rodapé
-st.caption("Drogafonte - Sistema de Integridade em Licitações Públicas v2.1")
+st.caption("Drogafonte - Inteligência em Licitações v2.2")
