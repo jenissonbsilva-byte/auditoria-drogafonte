@@ -27,7 +27,7 @@ estado_destino = st.sidebar.selectbox(
     index=6
 )
 
-# 4. FUNÇÕES DE APOIO (FRACIONAMENTO)
+# 4. FUNÇÕES DE APOIO
 def extrair_qtd_cmed(apres):
     apres = str(apres).upper()
     if "DOS" in apres: return 1
@@ -41,10 +41,8 @@ def extrair_qtd_cmed(apres):
 
 def ler_proposta_robusto(file_buffer):
     try:
-        # Tenta ler como Excel real
         return pd.read_excel(file_buffer, header=None)
     except:
-        # Fallback para CSV/TXT (arquivos .xls gerados por ERP)
         file_buffer.seek(0)
         try:
             return pd.read_csv(file_buffer, encoding='latin1', sep=None, engine='python', header=None, on_bad_lines='skip')
@@ -56,7 +54,7 @@ uploaded_file = st.file_uploader("📥 Arraste a proposta (Excel ou arquivo do s
 
 if uploaded_file is not None:
     if st.button("🚀 Executar Auditoria Oficial", use_container_width=True):
-        with st.spinner('Cruzando dados com a base da Anvisa...'):
+        with st.spinner('Processando...'):
             try:
                 # Carregar Base CMED
                 df_cmed = pd.read_excel('cmed_atual.xlsx')
@@ -69,28 +67,25 @@ if uploaded_file is not None:
                             df_cmed.columns = df_cmed.columns.astype(str).str.strip()
                             break
                 
-                c_apres_cmed = [c for c in df_cmed.columns if 'APRESENTA' in str(c).upper()][0]
+                col_apres_list = [c for c in df_cmed.columns if 'APRESENTA' in str(c).upper()]
+                c_apres_cmed = col_apres_list[0] if col_apres_list else df_cmed.columns[10]
 
                 # Processar Proposta
                 df_raw = ler_proposta_robusto(uploaded_file)
-                if df_raw is None: st.error("Erro ao ler o arquivo."); st.stop()
+                if df_raw is None: st.error("Erro na leitura do arquivo."); st.stop()
                 
-                # BUSCA ULTRA-RESILIENTE DE CABEÇALHO
+                # BUSCA DE CABEÇALHO
                 linha_cab = 0
                 achou = False
                 for i, row in df_raw.iterrows():
-                    celulas = row.astype(str).str.upper().tolist()
-                    # Procura por indícios de Registro E Valor Unitário na mesma linha
-                    tem_reg = any('REG' in c or 'M.S' in c for c in celulas)
-                    tem_vlr = any('VLR' in c or 'UNIT' in c or 'PREÇO' in c for c in celulas)
-                    
-                    if tem_reg and tem_vlr:
+                    vals = row.astype(str).str.upper().tolist()
+                    if any('REG' in v or 'M.S' in v for v in vals) and any('VLR' in v or 'UNIT' in v for v in vals):
                         linha_cab = i
                         achou = True
                         break
                 
                 if not achou:
-                    st.error("Não encontramos as colunas de 'Registro' ou 'Valor' na sua planilha. Verifique se o arquivo está correto.")
+                    st.error("Cabeçalho não identificado. Verifique se as colunas 'Reg.M.S' e 'Vlr. Unit.' existem.")
                     st.stop()
 
                 cabecalho_pdf = [" ".join(df_raw.iloc[j].dropna().astype(str).tolist()) for j in range(linha_cab) if str(df_raw.iloc[j].dropna()).strip()]
@@ -98,10 +93,14 @@ if uploaded_file is not None:
                 df_prop = df_raw.iloc[linha_cab+1:].copy()
                 df_prop.columns = df_raw.iloc[linha_cab].astype(str).str.strip()
 
-                # Identificar colunas finais
-                c_desc = [c for c in df_prop.columns if any(x in str(c).upper() for x in ['DISC', 'DESC', 'NOME', 'PROD'])][0]
-                c_reg = [c for c in df_prop.columns if any(x in str(c).upper() for x in ['REG', 'M.S', 'MS'])][0]
-                c_vlr = [c for c in df_prop.columns if any(x in str(c).upper() for x in ['VLR', 'UNIT', 'PREÇO'])][0]
+                # --- MAPEAMENTO SEGURO (RESOLVE O INDEX ERROR) ---
+                def find_col(possiveis_nomes, index_padrao):
+                    cols = [c for c in df_prop.columns if any(p.upper() in str(c).upper() for p in possiveis_nomes)]
+                    return cols[0] if cols else df_prop.columns[index_padrao]
+
+                c_desc = find_col(['DISC', 'DESC', 'NOME', 'PRODUTO'], 2)
+                c_reg = find_col(['REG', 'M.S', 'MS'], 6)
+                c_vlr = find_col(['VLR', 'UNIT', 'PREÇO'], 9)
 
                 # Cálculos
                 df_prop['Reg_L'] = df_prop[c_reg].astype(str).str.replace(r'[^0-9]', '', regex=True)
@@ -127,12 +126,12 @@ if uploaded_file is not None:
                 pdf.ln(5); pdf.set_draw_color(180); pdf.line(10, pdf.get_y(), 287, pdf.get_y()); pdf.ln(5)
                 
                 pdf.set_font("Arial", 'B', 14); pdf.set_text_color(200, 0, 0)
-                pdf.cell(0, 10, f"RELATÓRIO DE DIVERGÊNCIAS CMED - DESTINO: {estado_destino}", ln=True, align='C')
+                pdf.cell(0, 10, "RELATÓRIO DE DIVERGÊNCIAS CMED", ln=True, align='C')
                 pdf.ln(5)
 
                 if df_erros.empty:
                     pdf.set_font("Arial", 'B', 16); pdf.set_text_color(0, 120, 0)
-                    pdf.cell(0, 30, "✅ PROPOSTA AUDITADA: 100% OK.", ln=True, align='C')
+                    pdf.cell(0, 30, "✅ PROPOSTA 100% OK.", ln=True, align='C')
                 else:
                     pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(240)
                     pdf.cell(12, 8, "Item", 1, 0, 'C', True)
@@ -153,11 +152,11 @@ if uploaded_file is not None:
 
                 pdf_file = "Auditoria_Final.pdf"
                 pdf.output(pdf_file)
-                st.success("Auditoria Concluída!")
+                st.success("Concluído!")
                 with open(pdf_file, "rb") as f:
-                    st.download_button("📩 Baixar PDF de Divergências", f, file_name=pdf_file, mime="application/pdf", type="primary")
+                    st.download_button("📩 Baixar PDF", f, file_name=pdf_file, mime="application/pdf", type="primary")
 
             except Exception as e:
-                st.error(f"Erro de Processamento: {e}")
+                st.error(f"Erro Crítico: {e}")
 
-st.caption("Drogafonte - Inteligência em Licitações v2.2")
+st.caption("Drogafonte - v2.3")
