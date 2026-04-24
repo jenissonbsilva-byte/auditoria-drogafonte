@@ -196,4 +196,27 @@ else:
             pdf.cell(0, 10, f"RELATORIO DE DIVERGENCIAS - {st.session_state.aliquota}", ln=True, align='C')
             pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(235, 235, 235)
             pdf.cell(15, 8, "Item", 1, 0, 'C', True); pdf.cell(150, 8, "Descricao", 1, 0, 'C', True)
-            pdf.cell(30, 8, "Proposta", 1, 0, 'C', True); pdf.cell(30, 8, "Teto", 1, 0, 'C', True); pdf.cell(30, 8,
+            pdf.cell(30, 8, "Proposta", 1, 0, 'C', True); pdf.cell(30, 8, "Teto", 1, 0, 'C', True); pdf.cell(30, 8, "Dif.", 1, 1, 'C', True)
+            pdf.set_font("Arial", '', 8)
+            for _, r in df_p.iterrows():
+                pdf.cell(15, 7, str(r['Col_Item']), 1, 0, 'C')
+                pdf.cell(150, 7, str(r['Col_Desc'])[:90].encode('latin-1', 'replace').decode('latin-1'), 1)
+                pdf.cell(30, 7, f"R$ {r['V_Unit']:.4f}", 1, 0, 'C')
+                pdf.cell(30, 7, f"R$ {r['Teto_U']:.4f}", 1, 0, 'C')
+                pdf.cell(30, 7, f"R$ {r['Diferenca']:.4f}", 1, 1, 'C')
+
+            # PÁGINA 2: REGISTROS
+            if not df_r.empty:
+                pdf.add_page()
+                pdf.set_font("Arial", 'B', 14); pdf.set_text_color(0)
+                pdf.cell(0, 10, "ALERTAS DE REGISTRO E PRODUTOS NOTIFICADOS", ln=True, align='C')
+                pdf.ln(5)
+                pdf.set_font("Arial", 'B', 8); pdf.set_fill_color(235, 235, 235)
+                pdf.cell(15, 8, "Item", 1, 0, 'C', True); pdf.cell(180, 8, "Descricao", 1, 0, 'C', True); pdf.cell(60, 8, "Registro", 1, 1, 'C', True)
+                pdf.set_font("Arial", '', 8)
+                for _, r in df_r.iterrows():
+                    pdf.cell(15, 7, str(r['Col_Item']), 1, 0, 'C')
+                    pdf.cell(180, 7, str(r['Col_Desc'])[:100].encode('latin-1', 'replace').decode('latin-1'), 1)
+                    pdf.cell(60, 7, str(r['Col_Reg']), 1, 1, 'C')
+
+            st.download_button("💾 Baixar PDF", pdf.output(dest='S').encode('latin-1'), "Relatorio_Auditoria.pdf", "application/pdf")
