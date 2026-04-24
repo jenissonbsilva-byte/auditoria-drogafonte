@@ -17,12 +17,12 @@ def resetar_app():
     for key in ['dados_finais', 'erros_registro', 'cabecalho_pdf', 'erro', 'aliquota']:
         if key in st.session_state: del st.session_state[key]
 
-# --- MOTOR DE INTELIGÊNCIA DE DIVISORES ---
+# --- MOTOR DE INTELIGÊNCIA DE DIVISORES (REGRA ATUALIZADA) ---
 def extrair_divisor_inteligente(apres_cmed, unid_proposta):
     apres_cmed = str(apres_cmed).upper()
     unid_proposta = str(unid_proposta).upper().strip()
 
-    # 1. Se for Caixa ou Dose -> Divisor 1 (Preço da caixa cheia)
+    # 1. Se for Caixa (CX) ou Dose (DOS) -> Divisor 1 (Preço da caixa cheia)
     if any(x in unid_proposta for x in ["CX", "CAIXA", "DOS", "DOSE"]):
         return 1
 
@@ -36,19 +36,22 @@ def extrair_divisor_inteligente(apres_cmed, unid_proposta):
         m = re.search(r'(\d+)\s*X\s*(\d+)', apres_cmed)
         return float(m.group(2)) if m else 1
 
-    # 4. PADRÃO: "CONSIDERAR UNIDADE" (CPR, UN, AMP, etc.)
-    # Busca o total de unidades na embalagem CMED
-    # Padrão: 3 BLISTERS X 10
+    # 4. SE NÃO TIVER CX, DOS, ML ou CAR -> CONSIDERAR UNIDADE
+    # Vasculha a CMED para descobrir quantas unidades vêm na caixa para dividir o preço
+    
+    # Padrão: 3 BLISTERS X 10 (ex: 30 unidades)
     m = re.search(r'\b(\d+)\s+(?:BL|ENV|STRIP|CPR|CAP|AMP|FA|FR|SER).*?X\s+(\d+)\b', apres_cmed)
     if m: return float(m.group(1)) * float(m.group(2))
     
-    # Padrão: CX X 30
+    # Padrão: CX X 30 (ex: 30 unidades)
     m = re.search(r'X\s+(\d+)\b(?!\s*(?:ML|MG|G|MCG|UI))', apres_cmed)
     if m: return float(m.group(1))
     
-    # Padrão: CT C/ 20
+    # Padrão: CT C/ 20 (ex: 20 unidades)
     m = re.search(r'(?:C/|CT|CX)\s*(\d+)\b', apres_cmed)
-    return float(m.group(1)) if m else 1
+    if m: return float(m.group(1))
+    
+    return 1
 
 def formatar_moeda(val):
     v = str(val).replace('R$', '').strip()
@@ -60,7 +63,8 @@ def formatar_moeda(val):
 
 def exportar_excel(df):
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+    # Trocado engine para 'openpyxl' para evitar erro de ModuleNotFoundError na nuvem
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Auditoria_CMED')
     return output.getvalue()
 
@@ -127,8 +131,14 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
 # --- INTERFACE ---
 df_cmed = carregar_cmed()
 with st.sidebar:
-    # Nova URL da Logo
-    st.image("https://drogafonte.com.br/wp-content/uploads/2021/10/logo-drogafonte.png", width=200)
+    # Tenta usar a logo local primeiro, se falhar puxa da web
+    try:
+        if os.path.exists("logo.png"): st.image("logo.png", width=200)
+        elif os.path.exists("logo_drogafonte.png"): st.image("logo_drogafonte.png", width=200)
+        else: st.image("https://drogafonte.com.br/wp-content/uploads/2021/10/logo-drogafonte.png", width=200)
+    except:
+        st.markdown("### 🛡️ DROGAFONTE")
+
     st.divider()
     aliquota = st.selectbox("ICMS de Destino:", ["PF 12%", "PF 17%", "PF 17,5%", "PF 18%", "PF 19%", "PF 19,5%", "PF 20%", "PF 20,5%", "PF 21%", "PF 22%"], index=7)
     if df_cmed is not None: st.success("Base CMED Ativa")
@@ -186,27 +196,4 @@ else:
             pdf.cell(0, 10, f"RELATORIO DE DIVERGENCIAS - {st.session_state.aliquota}", ln=True, align='C')
             pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(235, 235, 235)
             pdf.cell(15, 8, "Item", 1, 0, 'C', True); pdf.cell(150, 8, "Descricao", 1, 0, 'C', True)
-            pdf.cell(30, 8, "Proposta", 1, 0, 'C', True); pdf.cell(30, 8, "Teto", 1, 0, 'C', True); pdf.cell(30, 8, "Dif.", 1, 1, 'C', True)
-            pdf.set_font("Arial", '', 8)
-            for _, r in df_p.iterrows():
-                pdf.cell(15, 7, str(r['Col_Item']), 1, 0, 'C')
-                pdf.cell(150, 7, str(r['Col_Desc'])[:90].encode('latin-1', 'replace').decode('latin-1'), 1)
-                pdf.cell(30, 7, f"R$ {r['V_Unit']:.4f}", 1, 0, 'C')
-                pdf.cell(30, 7, f"R$ {r['Teto_U']:.4f}", 1, 0, 'C')
-                pdf.cell(30, 7, f"R$ {r['Diferenca']:.4f}", 1, 1, 'C')
-
-            # PÁGINA 2: REGISTROS
-            if not df_r.empty:
-                pdf.add_page()
-                pdf.set_font("Arial", 'B', 14); pdf.set_text_color(0)
-                pdf.cell(0, 10, "ALERTAS DE REGISTRO E PRODUTOS NOTIFICADOS", ln=True, align='C')
-                pdf.ln(5)
-                pdf.set_font("Arial", 'B', 8); pdf.set_fill_color(235, 235, 235)
-                pdf.cell(15, 8, "Item", 1, 0, 'C', True); pdf.cell(180, 8, "Descricao", 1, 0, 'C', True); pdf.cell(60, 8, "Registro", 1, 1, 'C', True)
-                pdf.set_font("Arial", '', 8)
-                for _, r in df_r.iterrows():
-                    pdf.cell(15, 7, str(r['Col_Item']), 1, 0, 'C')
-                    pdf.cell(180, 7, str(r['Col_Desc'])[:100].encode('latin-1', 'replace').decode('latin-1'), 1)
-                    pdf.cell(60, 7, str(r['Col_Reg']), 1, 1, 'C')
-
-            st.download_button("💾 Baixar PDF", pdf.output(dest='S').encode('latin-1'), "Relatorio_Auditoria.pdf", "application/pdf")
+            pdf.cell(30, 8, "Proposta", 1, 0, 'C', True); pdf.cell(30, 8, "Teto", 1, 0, 'C', True); pdf.cell(30, 8,
