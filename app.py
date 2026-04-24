@@ -136,7 +136,7 @@ with st.sidebar:
     st.divider()
     aliquota = st.selectbox("ICMS Destino:", ["PF 12%", "PF 17%", "PF 17,5%", "PF 18%", "PF 19%", "PF 19,5%", "PF 20%", "PF 20,5%", "PF 21%", "PF 22%"], index=7)
 
-st.title("🛡️ Validador CMED")
+st.title("🛡️ Validador CMED - Drogafonte")
 
 if not st.session_state.tela_resultado:
     upload = st.file_uploader("Arraste a Proposta", type=['xls', 'xlsx', 'csv'])
@@ -157,7 +157,15 @@ else:
         st.subheader("🚨 Preços Acima do Teto")
         if df_p.empty: st.success("Tudo OK!")
         else:
-            st.dataframe(df_p[['Col_Item', 'Col_Desc', 'V_Unit', 'Teto_U', 'Diferenca']].style.format('{:.4f}'), use_container_width=True)
+            # CORREÇÃO DO ERRO DE FORMATAÇÃO AQUI:
+            st.dataframe(
+                df_p[['Col_Item', 'Col_Desc', 'V_Unit', 'Teto_U', 'Diferenca']].style.format({
+                    'V_Unit': '{:.4f}', 
+                    'Teto_U': '{:.4f}', 
+                    'Diferenca': '{:.4f}'
+                }), 
+                use_container_width=True
+            )
 
         st.divider()
         st.subheader("⚠️ Alertas de Registro / Notificados")
