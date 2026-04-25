@@ -9,6 +9,39 @@ import base64
 # Configuração da Página
 st.set_page_config(page_title="Auditoria Drogafonte - CMED", layout="wide", page_icon="🛡️")
 
+# --- DICIONÁRIO DE ALÍQUOTAS POR ESTADO ---
+ESTADOS_ICMS = {
+    "ACRE (19%)": "PF 19%",
+    "ALAGOAS (19%)": "PF 19%",
+    "AMAPÁ (18%)": "PF 18%",
+    "AMAZONAS (20%)": "PF 20%",
+    "BAHIA (20,5%)": "PF 20,5%",
+    "CEARÁ (20%)": "PF 20%",
+    "DISTRITO FEDERAL (17%)": "PF 17%",
+    "ESPÍRITO SANTO (17%)": "PF 17%",
+    "GOIÁS (19%)": "PF 19%",
+    "MARANHÃO (23%)": "PF 22%", # A CMED geralmente agrupa o teto máximo em 22% na tabela padrão
+    "MATO GROSSO (17%)": "PF 17%",
+    "MATO GROSSO DO SUL (17%)": "PF 17%",
+    "MINAS GERAIS (18%)": "PF 18%",
+    "MINAS GERAIS - GENÉRICOS (12%)": "PF 12%",
+    "PARÁ (19%)": "PF 19%",
+    "PARAÍBA (20%)": "PF 20%",
+    "PARANÁ (19,5%)": "PF 19,5%",
+    "PERNAMBUCO (20,5%)": "PF 20,5%",
+    "PIAUÍ (22,5%)": "PF 22%", # Ajustado para o teto máximo atual da tabela CMED
+    "RIO DE JANEIRO (22%)": "PF 22%",
+    "RIO GRANDE DO NORTE (20%)": "PF 20%",
+    "RIO GRANDE DO SUL (17%)": "PF 17%",
+    "RONDÔNIA (19,5%)": "PF 19,5%",
+    "RORAIMA (20%)": "PF 20%",
+    "SANTA CATARINA (17%)": "PF 17%",
+    "SÃO PAULO (18%)": "PF 18%",
+    "SÃO PAULO - GENÉRICOS (12%)": "PF 12%",
+    "SERGIPE (19%)": "PF 19%",
+    "TOCANTINS (20%)": "PF 20%"
+}
+
 # --- FUNÇÕES DE APOIO E LIMPEZA ---
 def get_image_base64(path):
     try:
@@ -46,7 +79,7 @@ if 'tela_resultado' not in st.session_state:
 
 def resetar_app():
     st.session_state.tela_resultado = False
-    for key in ['dados_todos', 'dados_finais', 'erros_registro', 'cabecalho_pdf', 'erro', 'aliquota']:
+    for key in ['dados_todos', 'dados_finais', 'erros_registro', 'cabecalho_pdf', 'erro', 'aliquota', 'estado_nome']:
         if key in st.session_state: del st.session_state[key]
 
 # --- MOTOR LÓGICO DE QUANTIDADES ---
@@ -162,7 +195,14 @@ with st.sidebar:
         st.image("https://drogafonte.com.br/wp-content/uploads/2021/10/logo-drogafonte.png", width=200)
     
     st.divider()
-    aliquota = st.selectbox("ICMS Destino:", ["PF 12%", "PF 17%", "PF 17,5%", "PF 18%", "PF 19%", "PF 19,5%", "PF 20%", "PF 20,5%", "PF 21%", "PF 22%"], index=7)
+    
+    # --- NOVO SELECTBOX POR ESTADO ---
+    lista_estados = list(ESTADOS_ICMS.keys())
+    indice_pe = lista_estados.index("PERNAMBUCO (20,5%)") # Deixa PE como padrão
+    estado_selecionado = st.selectbox("Estado de Destino:", lista_estados, index=indice_pe)
+    aliquota = ESTADOS_ICMS[estado_selecionado]
+    
+    st.caption(f"📍 Mapeado para: **{aliquota}**")
 
 st.title("🛡️ Validador CMED - Modo Diagnóstico")
 
@@ -170,7 +210,7 @@ if not st.session_state.tela_resultado:
     upload = st.file_uploader("Arraste a Proposta", type=['xls', 'xlsx', 'csv'])
     if upload and st.button("🚀 Iniciar Auditoria", use_container_width=True, type="primary"):
         t, p, r, c, err = processar_dados(upload, df_cmed, aliquota)
-        st.session_state.dados_todos, st.session_state.dados_finais, st.session_state.erros_registro, st.session_state.cabecalho_pdf, st.session_state.erro, st.session_state.aliquota = t, p, r, c, err, aliquota
+        st.session_state.dados_todos, st.session_state.dados_finais, st.session_state.erros_registro, st.session_state.cabecalho_pdf, st.session_state.erro, st.session_state.aliquota, st.session_state.estado_nome = t, p, r, c, err, aliquota, estado_selecionado
         st.session_state.tela_resultado = True
         st.rerun()
 else:
@@ -229,7 +269,8 @@ else:
                 pdf.ln(5)
                 
                 pdf.set_font("Arial", 'B', 14); pdf.set_text_color(180, 0, 0)
-                pdf.cell(0, 10, f"DIVERGENCIAS DE PRECO - {st.session_state.aliquota}", ln=True, align='C')
+                # O título do PDF agora mostra o Estado escolhido
+                pdf.cell(0, 10, f"DIVERGENCIAS DE PRECO - {st.session_state.estado_nome}", ln=True, align='C')
                 pdf.ln(3)
                 
                 pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(230, 230, 230)
