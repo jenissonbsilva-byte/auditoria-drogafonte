@@ -28,6 +28,28 @@ def limpar_registro(reg):
         s = s[:-2]
     return re.sub(r'[^0-9]', '', s)
 
+def formatar_moeda(val):
+    """Lida com valores financeiros, removendo R$, asteriscos e caracteres especiais da CMED"""
+    if pd.isna(val) or str(val).strip() == '': 
+        return 0.0
+    
+    # Transforma em texto e remove tudo que não for número, vírgula ou ponto
+    v = str(val)
+    v = re.sub(r'[^\d\.,]', '', v)
+    
+    if v == '': 
+        return 0.0
+        
+    # Ajuste de decimal (1.234,56 vira 1234.56)
+    if '.' in v and ',' in v: 
+        v = v.replace('.', '')
+    v = v.replace(',', '.')
+    
+    try: 
+        return float(v)
+    except: 
+        return 0.0
+
 # --- ESTADOS DO SISTEMA ---
 if 'tela_resultado' not in st.session_state:
     st.session_state.tela_resultado = False
@@ -42,37 +64,35 @@ def extrair_qtd_cmed(apres_cmed, desc_proposta):
     apres = str(apres_cmed).upper()
     desc = str(desc_proposta).upper()
     
+    # 1. Blindagem Total para Doses/Sprays
     padrao_dose = r'\b(DOSES?|AEROSSOL|AEROSOL|AER\b|SPRAY|JATOS?|ACIONAMENTOS?|INALADOR|PULVERIZA[A-Z]*)\b'
     if re.search(padrao_dose, apres) or re.search(padrao_dose, desc):
         return 1
     
+    # Unidades que não representam multiplicador de caixas
     unidades_ignoradas = r'(?:ML|MG|G|MCG|UI|%|L|KG|GOTAS|MM|CM)'
     
+    # 2. Busca padrões de multiplicação (ex: 3 BL X 10)
     m = re.search(rf'\b(\d+)\s+(?:BL|ENV|STRIP|CPR|CAP|AMP|FA|FR|SER|TB|BS|CJ|SVD).*?X\s+(\d+)\b(?!\s*{unidades_ignoradas})', apres)
     if m: 
         return float(m.group(1)) * float(m.group(2))
     
+    # 3. Busca embalagens físicas ANTES da unidade (ex: "500 CPR" -> 500)
     m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|TB|BS|CJ|BOLS|CARP|TUB|BOMBA|CANETA|SVD|CX|CT|BL|ENV|STRIP|CPR|COMP?|CPRS|CAP|UN)\b', apres)
     if m:
         return float(m.group(1))
     
+    # 4. Busca padrão "X Quantidade" (ex: "X 500")
     m = re.search(rf'X\s+(\d+)\b(?!\s*{unidades_ignoradas})', apres)
     if m: 
         return float(m.group(1))
     
+    # 5. Busca padrão "Contém/Com" (ex: "CT C/ 500")
     m = re.search(r'(?:C/|CT|CX|COM|CONTEM)\s*(\d+)\b', apres)
     if m: 
         return float(m.group(1))
     
     return 1
-
-def formatar_moeda(val):
-    v = str(val).replace('R$', '').replace(' ', '').strip()
-    if pd.isna(val) or v.lower() == 'nan' or v == '': return 0.0
-    if '.' in v and ',' in v: v = v.replace('.', '')
-    v = v.replace(',', '.')
-    try: return float(v)
-    except: return 0.0
 
 def exportar_excel(df_todos, df_precos, df_alertas):
     output = io.BytesIO()
@@ -122,6 +142,8 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         c_apres_cmed = [c for c in df_cmed.columns if 'APRESENTA' in str(c).upper()][0]
 
         df_m = pd.merge(df_prop, df_cmed[['Reg_C', coluna_icms, c_apres_cmed]], left_on='Reg_L', right_on='Reg_C', how='left')
+        
+        # AQUI AGORA O PREÇO É LIMPO DE FORMA BLINDADA
         df_m['PF_Num'] = df_m[coluna_icms].apply(formatar_moeda)
         
         df_m['Divisor'] = df_m.apply(lambda row: extrair_qtd_cmed(row[c_apres_cmed], row[c_desc]), axis=1)
@@ -185,10 +207,10 @@ else:
                     use_container_width=True
                 )
 
-        # ABA 2: TODOS OS ITENS (O SEGREDO PARA DESCOBRIR A FALHA)
+        # ABA 2: TODOS OS ITENS
         with tab2:
             df_t = st.session_state.dados_todos
-            st.info("Aqui estão todos os itens processados. Procure pelo Ácido Folínico e verifique as colunas **PF CMED**, **Divisor** e **Teto Unit.** para entender como o robô calculou.")
+            st.info("Aqui estão todos os itens processados. Note que agora valores como '123,45 (*)' na CMED serão lidos perfeitamente.")
             exib_t = df_t[['Col_Item', 'Col_Desc', 'V_Unit', 'PF_Num', 'Divisor', 'Teto_U', 'Diferenca', 'Status']].copy()
             exib_t.columns = ['Item', 'Descrição', 'Valor Proposta', 'PF CMED', 'Divisor', 'Teto Unit.', 'Diferença', 'Status']
             st.dataframe(
@@ -206,10 +228,8 @@ else:
         
         st.divider()
 
-        # O VERDADEIRO BOTÃO DE EXCEL (XLSX) - AGORA COM ABAS DENTRO DO EXCEL TAMBÉM
         st.download_button("📥 Baixar Planilha Completa (Excel)", exportar_excel(st.session_state.dados_todos, st.session_state.dados_finais, st.session_state.erros_registro), "Auditoria_Diagnostico.xlsx", use_container_width=True)
 
-        # GERADOR DE PDF MANTIDO
         if st.button("📄 Gerar Relatório PDF Final", type="primary", use_container_width=True):
             pdf = FPDF(orientation='L', unit='mm', format='A4')
             
