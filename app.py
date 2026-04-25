@@ -29,26 +29,16 @@ def limpar_registro(reg):
     return re.sub(r'[^0-9]', '', s)
 
 def formatar_moeda(val):
-    """Lida com valores financeiros, removendo R$, asteriscos e caracteres especiais da CMED"""
+    """Lida com valores financeiros, removendo R$, asteriscos e caracteres especiais"""
     if pd.isna(val) or str(val).strip() == '': 
         return 0.0
-    
-    # Transforma em texto e remove tudo que não for número, vírgula ou ponto
     v = str(val)
     v = re.sub(r'[^\d\.,]', '', v)
-    
-    if v == '': 
-        return 0.0
-        
-    # Ajuste de decimal (1.234,56 vira 1234.56)
-    if '.' in v and ',' in v: 
-        v = v.replace('.', '')
+    if v == '': return 0.0
+    if '.' in v and ',' in v: v = v.replace('.', '')
     v = v.replace(',', '.')
-    
-    try: 
-        return float(v)
-    except: 
-        return 0.0
+    try: return float(v)
+    except: return 0.0
 
 # --- ESTADOS DO SISTEMA ---
 if 'tela_resultado' not in st.session_state:
@@ -64,33 +54,23 @@ def extrair_qtd_cmed(apres_cmed, desc_proposta):
     apres = str(apres_cmed).upper()
     desc = str(desc_proposta).upper()
     
-    # 1. Blindagem Total para Doses/Sprays
     padrao_dose = r'\b(DOSES?|AEROSSOL|AEROSOL|AER\b|SPRAY|JATOS?|ACIONAMENTOS?|INALADOR|PULVERIZA[A-Z]*)\b'
     if re.search(padrao_dose, apres) or re.search(padrao_dose, desc):
         return 1
     
-    # Unidades que não representam multiplicador de caixas
     unidades_ignoradas = r'(?:ML|MG|G|MCG|UI|%|L|KG|GOTAS|MM|CM)'
     
-    # 2. Busca padrões de multiplicação (ex: 3 BL X 10)
     m = re.search(rf'\b(\d+)\s+(?:BL|ENV|STRIP|CPR|CAP|AMP|FA|FR|SER|TB|BS|CJ|SVD).*?X\s+(\d+)\b(?!\s*{unidades_ignoradas})', apres)
-    if m: 
-        return float(m.group(1)) * float(m.group(2))
+    if m: return float(m.group(1)) * float(m.group(2))
     
-    # 3. Busca embalagens físicas ANTES da unidade (ex: "500 CPR" -> 500)
     m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|TB|BS|CJ|BOLS|CARP|TUB|BOMBA|CANETA|SVD|CX|CT|BL|ENV|STRIP|CPR|COMP?|CPRS|CAP|UN)\b', apres)
-    if m:
-        return float(m.group(1))
+    if m: return float(m.group(1))
     
-    # 4. Busca padrão "X Quantidade" (ex: "X 500")
     m = re.search(rf'X\s+(\d+)\b(?!\s*{unidades_ignoradas})', apres)
-    if m: 
-        return float(m.group(1))
+    if m: return float(m.group(1))
     
-    # 5. Busca padrão "Contém/Com" (ex: "CT C/ 500")
     m = re.search(r'(?:C/|CT|CX|COM|CONTEM)\s*(\d+)\b', apres)
-    if m: 
-        return float(m.group(1))
+    if m: return float(m.group(1))
     
     return 1
 
@@ -142,25 +122,33 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         c_apres_cmed = [c for c in df_cmed.columns if 'APRESENTA' in str(c).upper()][0]
 
         df_m = pd.merge(df_prop, df_cmed[['Reg_C', coluna_icms, c_apres_cmed]], left_on='Reg_L', right_on='Reg_C', how='left')
-        
-        # AQUI AGORA O PREÇO É LIMPO DE FORMA BLINDADA
         df_m['PF_Num'] = df_m[coluna_icms].apply(formatar_moeda)
         
         df_m['Divisor'] = df_m.apply(lambda row: extrair_qtd_cmed(row[c_apres_cmed], row[c_desc]), axis=1)
         df_m['Teto_U'] = df_m['PF_Num'] / df_m['Divisor']
         df_m['Diferenca'] = df_m['V_Unit'] - df_m['Teto_U']
 
-        # Prepara a tabela completa com mapeamento de colunas
+        # Prepara a tabela completa
         df_m['Col_Item'] = df_m[c_item]
         df_m['Col_Desc'] = df_m[c_desc]
         df_m['Col_Reg'] = df_m[c_reg]
         df_m['Status'] = df_m.apply(lambda x: '🔴 Acima do Teto' if x['Diferenca'] > 0.0005 else '🟢 Dentro do Teto', axis=1)
 
-        # Filtra os com problema
-        df_precos = df_m[(df_m['Diferenca'] > 0.0005) & (df_m['Teto_U'] > 0)].copy()
-        df_reg_err = df_m[(df_m['Reg_L'].str.len() > 0) & ((df_m['Reg_L'].str.len() != 13) | (df_m['Reg_C'].isna()))].copy()
+        # Filtra linhas completamente vazias (rodapés do excel)
+        df_valido = df_m[df_m['Col_Desc'].notna() & (df_m['Col_Desc'].astype(str).str.strip() != '')].copy()
 
-        return df_m, df_precos, df_reg_err, cabecalho_info, None
+        # Preços acima do teto
+        df_precos = df_valido[(df_valido['Diferenca'] > 0.0005) & (df_valido['Teto_U'] > 0)].copy()
+
+        # Condição Definitiva de Alertas de Registro
+        cond_alerta = (
+            df_valido['Col_Reg'].astype(str).str.upper().str.contains(r'NOTIFICADO|RDC', na=False) |
+            (df_valido['Reg_L'].str.len() != 13) |
+            (df_valido['Reg_C'].isna())
+        )
+        df_reg_err = df_valido[cond_alerta].copy()
+
+        return df_valido, df_precos, df_reg_err, cabecalho_info, None
     except Exception as e:
         return None, None, None, None, f"Erro: {str(e)}"
 
@@ -210,7 +198,7 @@ else:
         # ABA 2: TODOS OS ITENS
         with tab2:
             df_t = st.session_state.dados_todos
-            st.info("Aqui estão todos os itens processados. Note que agora valores como '123,45 (*)' na CMED serão lidos perfeitamente.")
+            st.info("Aqui estão todos os itens processados. Use para verificar se as divisões de caixas e os preços estão perfeitos.")
             exib_t = df_t[['Col_Item', 'Col_Desc', 'V_Unit', 'PF_Num', 'Divisor', 'Teto_U', 'Diferenca', 'Status']].copy()
             exib_t.columns = ['Item', 'Descrição', 'Valor Proposta', 'PF CMED', 'Divisor', 'Teto Unit.', 'Diferença', 'Status']
             st.dataframe(
@@ -222,6 +210,7 @@ else:
         with tab3:
             df_r = st.session_state.erros_registro
             if not df_r.empty:
+                st.warning("Aqui estão itens que devem ser revisados: RDC, Notificados, Registros com tamanho errado ou não localizados na CMED.")
                 st.dataframe(df_r[['Col_Item', 'Col_Desc', 'Col_Reg']], use_container_width=True)
             else:
                 st.info("Nenhum alerta de registro.")
