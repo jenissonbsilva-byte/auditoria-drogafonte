@@ -40,9 +40,10 @@ st.sidebar.header("⚙️ Configurações")
 if os.path.exists("logo_drogafonte.png"):
     st.sidebar.image("logo_drogafonte.png", use_container_width=True)
 
+# Removidos os espaços antes do "%" para maior compatibilidade com a CMED
 estado_destino = st.sidebar.selectbox(
     "Estado da Licitação:", 
-    ["PF 12 %", "PF 17 %", "PF 17,5 %", "PF 18 %", "PF 19 %", "PF 20 %", "PF 20,5 %"], 
+    ["PF 12%", "PF 17%", "PF 17,5%", "PF 18%", "PF 19%", "PF 20%", "PF 20,5%"], 
     index=6
 ).upper()
 
@@ -95,12 +96,17 @@ else:
                 try:
                     df_cmed = df_cmed_base.copy()
                     
-                    # PROTEÇÃO CMED: Evita o erro 'REGISTRO' e 'Index out of range'
+                    # PROTEÇÃO CMED: Evita o erro 'REGISTRO', 'APRESENTA' e 'PF'
                     lista_apres = [c for c in df_cmed.columns if 'APRESENTA' in c]
                     c_apres_cmed = lista_apres[0] if lista_apres else df_cmed.columns[10]
                     
                     lista_reg = [c for c in df_cmed.columns if 'REGISTRO' in c]
                     c_reg_cmed = lista_reg[0] if lista_reg else df_cmed.columns[0]
+
+                    # BUSCA INTELIGENTE DO ESTADO (Resolve o erro "PF 20,5 % not in index")
+                    estado_limpo = estado_destino.replace(" ", "").replace(",", ".")
+                    col_estado = [c for c in df_cmed.columns if estado_limpo in str(c).replace(" ", "").replace(",", ".")]
+                    c_estado_cmed = col_estado[0] if col_estado else estado_destino
 
                     df_raw = ler_proposta_robusto(uploaded_file)
                     
@@ -137,8 +143,8 @@ else:
                     
                     df_prop['V_UNIT_N'] = df_prop[c_vlr].astype(str).str.replace('R$', '').str.replace(' ', '').str.replace('.', '').str.replace(',', '.').astype(float)
 
-                    df_m = pd.merge(df_prop, df_cmed[['REG_C', estado_destino, c_apres_cmed]], left_on='REG_L', right_on='REG_C', how='left')
-                    df_m['PF_NUM'] = df_m[estado_destino].astype(str).str.replace('.', '').str.replace(',', '.').astype(float)
+                    df_m = pd.merge(df_prop, df_cmed[['REG_C', c_estado_cmed, c_apres_cmed]], left_on='REG_L', right_on='REG_C', how='left')
+                    df_m['PF_NUM'] = df_m[c_estado_cmed].astype(str).str.replace('.', '').str.replace(',', '.').astype(float)
                     df_m['QTD_C'] = df_m[c_apres_cmed].apply(extrair_qtd_cmed)
                     df_m['TETO_U'] = df_m['PF_NUM'] / df_m['QTD_C']
                     
@@ -185,4 +191,4 @@ else:
                 except Exception as e:
                     st.error(f"Erro de Auditoria: {e}")
 
-st.caption("Drogafonte - v2.8 | Layout Original e Motor Protegido")
+st.caption("Drogafonte - v2.9 | Layout Original e Motor Protegido")
