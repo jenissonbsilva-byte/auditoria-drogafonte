@@ -8,7 +8,7 @@ from fpdf import FPDF
 # 1. CONFIGURAÇÃO DA PÁGINA
 st.set_page_config(page_title="Auditoria Drogafonte", page_icon="💊", layout="centered")
 
-# --- CACHE: LEITURA BLINDADA DA CMED (v3.1) ---
+# --- CACHE: LEITURA BLINDADA DA CMED ---
 @st.cache_data(show_spinner=False)
 def carregar_base_cmed(caminho):
     try:
@@ -100,14 +100,16 @@ else:
                     lista_reg = [c for c in df_cmed.columns if 'REGISTRO' in c]
                     c_reg_cmed = lista_reg[0] if lista_reg else df_cmed.columns[0]
 
-                    # BUSCA DE ESTADO INTELIGENTE
-                    # Limpa o texto: 'PF 20,5 %' vira '20.5%'
+                    # BUSCA DE ESTADO INTELIGENTE (Ignora asteriscos e espaços)
                     estado_num = estado_destino.replace("PF", "").replace("%", "").replace(" ", "").replace(",", ".")
-                    estado_busca = estado_num + "%"
+                    estado_busca = f"{estado_num}%"
                     
                     col_estado = []
                     for c in df_cmed.columns:
-                        c_limpo = str(c).upper().replace(" ", "").replace(",", ".")
+                        # O regex abaixo remove tudo que NÃO seja letra, número, %, vírgula ou ponto. (Mata o asterisco *)
+                        c_limpo = re.sub(r'[^A-Z0-9%,.]', '', str(c).upper())
+                        c_limpo = c_limpo.replace(",", ".")
+                        
                         if "PF" in c_limpo and estado_busca in c_limpo and "ALC" not in c_limpo:
                             col_estado.append(c)
                     
@@ -199,4 +201,4 @@ else:
                 except Exception as e:
                     st.error(f"Erro de Auditoria: {e}")
 
-st.caption("Drogafonte - v3.1 | Reconhecimento Imbatível da CMED")
+st.caption("Drogafonte - v3.2 | Filtro Anti-Asterisco Ativado")
