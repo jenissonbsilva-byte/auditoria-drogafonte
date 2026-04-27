@@ -95,7 +95,10 @@ else:
             with st.spinner('A processar auditoria...'):
                 try:
                     df_cmed = df_cmed_base.copy()
-                    c_apres_cmed = [c for c in df_cmed.columns if 'APRESENTA' in c][0]
+                    
+                    # PROTEÇÃO 1: Evita 'list index out of range' se não achar APRESENTAÇÃO
+                    lista_apres = [c for c in df_cmed.columns if 'APRESENTA' in c]
+                    c_apres_cmed = lista_apres[0] if lista_apres else df_cmed.columns[10]
 
                     df_raw = ler_proposta_robusto(uploaded_file)
                     if df_raw is None:
@@ -119,10 +122,12 @@ else:
                     df_prop = df_raw.iloc[linha_cab+1:].copy()
                     df_prop.columns = [str(c).strip().upper() for c in df_raw.iloc[linha_cab].tolist()]
 
+                    # PROTEÇÃO 2: Evita 'list index out of range' na busca de colunas
                     def find_col(nomes, idx):
                         for c in df_prop.columns:
                             if any(n in str(c) for n in nomes): return c
-                        return df_prop.columns[idx]
+                        # Se não achar pelo nome, pega pela posição (sem dar erro se a lista for menor)
+                        return df_prop.columns[idx] if idx < len(df_prop.columns) else df_prop.columns[-1]
 
                     c_desc = find_col(['DISC', 'DESC', 'NOME', 'PROD'], 2)
                     c_reg = find_col(['REG', 'M.S', 'MS'], 6)
