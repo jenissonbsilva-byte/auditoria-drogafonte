@@ -15,8 +15,8 @@ def carregar_base_cmed(caminho):
         df = pd.read_excel(caminho)
         df.columns = [str(c).strip().upper() for c in df.columns]
         
-        # Se não achar o cabeçalho, varre o ficheiro
-        if 'REGISTRO' not in df.columns:
+        # Se não achar o cabeçalho "REGISTRO", varre o ficheiro
+        if not any('REGISTRO' in c for c in df.columns):
             df_temp = pd.read_excel(caminho, header=None)
             for i, r in df_temp.iterrows():
                 if any('REGISTRO' in str(v).upper() for v in r):
@@ -46,7 +46,7 @@ estado_destino = st.sidebar.selectbox(
     index=6
 ).upper()
 
-# 4. MOTOR DE FRACIONAMENTO (Lógica Blindada v2.7)
+# 4. MOTOR DE FRACIONAMENTO BLINDADO (Decimais e Seringas)
 def extrair_qtd_cmed(apres):
     texto = str(apres).upper().strip()
     if texto == 'NAN' or not texto: return 1
@@ -57,15 +57,15 @@ def extrair_qtd_cmed(apres):
     
     if "DOS" in texto: return 1
     
-    # 1. Busca flexível de recipientes (SER, SERG, SERINGA, etc)
+    # Busca flexível de recipientes (SER, SERG, SERINGA, etc)
     m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|BOLS|CARP|TUB|BOMBA|CANETA|SVD)[A-Z]*\b', texto)
     if m: return int(m.group(1))
-
-    # 2. Múltiplos com escudo decimal
+    
+    # Múltiplos com escudo decimal (ex: 50 BL X 10)
     m = re.search(r'\b(\d+)\s+(?:BL|ENV|STRIP).*?X\s+(\d+)\b(?!\s*[,.]|\s*(?:ML|MG|G|MCG|UI))', texto)
     if m: return int(m.group(1)) * int(m.group(2))
     
-    # 3. Multiplicador final com escudo decimal
+    # Multiplicador final com escudo decimal (Ignora volumes como X 0,6 ML)
     m = re.search(r'X\s+(\d+)\b(?!\s*[,.]|\s*(?:ML|MG|G|MCG|UI|U\.I\.))', texto)
     if m: return int(m.group(1))
     
@@ -85,7 +85,6 @@ def ler_proposta_robusto(file_buffer):
 if not os.path.exists('cmed_atual.xlsx'):
     st.error("Erro: O ficheiro 'cmed_atual.xlsx' não foi encontrado no GitHub.")
 else:
-    # Carrega a CMED (Uma única vez devido ao @st.cache_data)
     df_cmed_base = carregar_base_cmed('cmed_atual.xlsx')
     
     uploaded_file = st.file_uploader("📥 Arraste a proposta aqui", type=['xls', 'xlsx', 'csv'])
@@ -96,14 +95,14 @@ else:
                 try:
                     df_cmed = df_cmed_base.copy()
                     
-                    # PROTEÇÃO 1: Evita 'list index out of range' se não achar APRESENTAÇÃO
+                    # PROTEÇÃO CMED: Evita o erro 'REGISTRO' e 'Index out of range'
                     lista_apres = [c for c in df_cmed.columns if 'APRESENTA' in c]
                     c_apres_cmed = lista_apres[0] if lista_apres else df_cmed.columns[10]
+                    
+                    lista_reg = [c for c in df_cmed.columns if 'REGISTRO' in c]
+                    c_reg_cmed = lista_reg[0] if lista_reg else df_cmed.columns[0]
 
                     df_raw = ler_proposta_robusto(uploaded_file)
-                    if df_raw is None:
-                        st.error("Erro na leitura do ficheiro.")
-                        st.stop()
                     
                     linha_cab = 0
                     achou = False
@@ -122,11 +121,10 @@ else:
                     df_prop = df_raw.iloc[linha_cab+1:].copy()
                     df_prop.columns = [str(c).strip().upper() for c in df_raw.iloc[linha_cab].tolist()]
 
-                    # PROTEÇÃO 2: Evita 'list index out of range' na busca de colunas
+                    # PROTEÇÃO PROPOSTA: Evita 'list index out of range'
                     def find_col(nomes, idx):
                         for c in df_prop.columns:
                             if any(n in str(c) for n in nomes): return c
-                        # Se não achar pelo nome, pega pela posição (sem dar erro se a lista for menor)
                         return df_prop.columns[idx] if idx < len(df_prop.columns) else df_prop.columns[-1]
 
                     c_desc = find_col(['DISC', 'DESC', 'NOME', 'PROD'], 2)
@@ -135,7 +133,7 @@ else:
 
                     # Cruzamento
                     df_prop['REG_L'] = df_prop[c_reg].astype(str).str.replace(r'[^0-9]', '', regex=True)
-                    df_cmed['REG_C'] = df_cmed['REGISTRO'].astype(str).str.replace(r'[^0-9]', '', regex=True)
+                    df_cmed['REG_C'] = df_cmed[c_reg_cmed].astype(str).str.replace(r'[^0-9]', '', regex=True)
                     
                     df_prop['V_UNIT_N'] = df_prop[c_vlr].astype(str).str.replace('R$', '').str.replace(' ', '').str.replace('.', '').str.replace(',', '.').astype(float)
 
@@ -187,4 +185,4 @@ else:
                 except Exception as e:
                     st.error(f"Erro de Auditoria: {e}")
 
-st.caption("Drogafonte - v2.7 | Performance Otimizada")
+st.caption("Drogafonte - v2.8 | Layout Original e Motor Protegido")
