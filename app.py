@@ -337,4 +337,4 @@ else:
                 
                 pdf.set_font("Arial", '', 7)
                 for _, row in df_r.iterrows():
-                    pdf.cell(15, 6, str(row['Col_Item']), 1, 0)
+                    pdf.cell(15, 6, str(row['Col_Item']), 1, 0, 'C')
