@@ -34,7 +34,7 @@ def get_image_base64(path):
         return None
 
 def obter_logo_local():
-    """Baixa a logo temporariamente para garantir que o FPDF consiga renderizar no PDF"""
+    """Baixa a logo temporariamente para garantir que o PDF consiga exibi-la sem bloqueio de rede"""
     if os.path.exists("logo_temp.png"):
         return "logo_temp.png"
     try:
@@ -256,7 +256,7 @@ else:
             if not df_p.empty:
                 pdf.add_page()
                 
-                # Inserção da Logomarca (GARANTIDA) no Canto Superior Direito (x=245)
+                # Inserção da Logomarca no Canto Superior Direito
                 logo_path = obter_logo_local()
                 if logo_path:
                     try:
@@ -296,7 +296,7 @@ else:
                 pdf.cell(22, 8, "Teto", 1, 0, 'C', True)
                 pdf.cell(22, 8, "Dif.", 1, 1, 'C', True)
                 
-                # Impressão das Linhas
+                # Impressão das Linhas (COM DESTAQUE NO TETO)
                 for _, row in df_p.iterrows():
                     pdf.set_font("Arial", '', 7) # Fonte normal para a linha
                     
@@ -307,11 +307,11 @@ else:
                     pdf.cell(22, 6, f"{row['PF_Num']:.4f}", 1, 0, 'C')
                     pdf.cell(12, 6, str(int(row['Divisor'])), 1, 0, 'C')
                     
-                    # TETO EM DESTAQUE: Negrito e um pouco maior
+                    # --- DESTAQUE AQUI: Aumenta o Teto e coloca em Negrito ---
                     pdf.set_font("Arial", 'B', 8.5)
                     pdf.cell(22, 6, f"{row['Teto_U']:.4f}", 1, 0, 'C')
                     
-                    # Volta para normal para a Diferença
+                    # Volta para normal para imprimir a Diferença
                     pdf.set_font("Arial", '', 7)
                     pdf.cell(22, 6, f"{row['Diferenca']:.4f}", 1, 1, 'C')
 
@@ -319,7 +319,7 @@ else:
             if not df_r.empty:
                 pdf.add_page()
                 
-                # Inserção da Logomarca (Canto Superior Direito)
+                # Inserção da Logomarca no Canto Superior Direito (Página 2)
                 if logo_path:
                     try:
                         pdf.image(logo_path, x=245, y=8, w=35)
@@ -338,3 +338,8 @@ else:
                 pdf.set_font("Arial", '', 7)
                 for _, row in df_r.iterrows():
                     pdf.cell(15, 6, str(row['Col_Item']), 1, 0, 'C')
+                    pdf.cell(130, 6, str(row['Col_Desc'])[:95].encode('latin-1', 'replace').decode('latin-1'), 1)
+                    pdf.cell(55, 6, str(row['Col_Marca'])[:35].encode('latin-1', 'replace').decode('latin-1'), 1)
+                    pdf.cell(45, 6, str(row['Col_Reg']), 1, 1, 'C')
+
+            st.download_button("💾 Baixar PDF do Relatório", pdf.output(dest='S').encode('latin-1'), "Relatorio_Auditoria.pdf", "application/pdf")
