@@ -8,19 +8,23 @@ from fpdf import FPDF
 # 1. CONFIGURAÇÃO DA PÁGINA
 st.set_page_config(page_title="Auditoria Drogafonte", page_icon="💊", layout="centered")
 
-# --- CACHE PARA VELOCIDADE MÁXIMA ---
+# --- CACHE: LEITURA BLINDADA DA CMED (v3.1) ---
 @st.cache_data(show_spinner=False)
 def carregar_base_cmed(caminho):
     try:
-        # Lê primeiro sem cabeçalho para varrer as linhas iniciais (A CMED tem ~41 linhas de texto antes da tabela)
+        # Lê o topo da tabela sem cabeçalho para procurar a linha exata
         df_temp = pd.read_excel(caminho, header=None)
         linha_cabecalho = 0
-        for i, r in df_temp.iterrows():
-            if any('REGISTRO' in str(v).upper() for v in r):
+        
+        # Procura nas primeiras 100 linhas para evitar os textos de aviso da Anvisa
+        for i, r in df_temp.head(100).iterrows():
+            celulas = " ".join([str(v).upper() for v in r])
+            # Varredura Tripla: Só aceita se tiver as 3 colunas vitais juntas
+            if 'REGISTRO' in celulas and 'APRESENTA' in celulas and 'PF' in celulas:
                 linha_cabecalho = i
                 break
                 
-        # Carrega a tabela final a partir da linha correta
+        # Carrega a tabela final cortando o "lixo" inicial
         df = pd.read_excel(caminho, skiprows=linha_cabecalho)
         df.columns = [str(c).strip().upper() for c in df.columns]
         return df
@@ -46,7 +50,7 @@ estado_destino = st.sidebar.selectbox(
     index=6
 ).upper()
 
-# 4. MOTOR DE FRACIONAMENTO BLINDADO (v3.0)
+# 4. MOTOR DE FRACIONAMENTO
 def extrair_qtd_cmed(apres):
     texto = str(apres).upper().strip()
     if texto == 'NAN' or not texto: return 1
@@ -90,30 +94,31 @@ else:
                 try:
                     df_cmed = df_cmed_base.copy()
                     
-                    # CAPTURA INTELIGENTE DE COLUNAS DA CMED
                     lista_apres = [c for c in df_cmed.columns if 'APRESENTA' in c]
                     c_apres_cmed = lista_apres[0] if lista_apres else df_cmed.columns[10]
                     
                     lista_reg = [c for c in df_cmed.columns if 'REGISTRO' in c]
                     c_reg_cmed = lista_reg[0] if lista_reg else df_cmed.columns[0]
 
-                    # BUSCA DE ESTADO (Ignora espaços e garante que pega a coluna exata do Estado)
-                    estado_limpo = estado_destino.replace(" ", "").replace(",", ".")
+                    # BUSCA DE ESTADO INTELIGENTE
+                    # Limpa o texto: 'PF 20,5 %' vira '20.5%'
+                    estado_num = estado_destino.replace("PF", "").replace("%", "").replace(" ", "").replace(",", ".")
+                    estado_busca = estado_num + "%"
+                    
                     col_estado = []
                     for c in df_cmed.columns:
-                        c_limpo = str(c).replace(" ", "").replace(",", ".")
-                        if estado_limpo in c_limpo and 'ALC' not in c_limpo:
+                        c_limpo = str(c).upper().replace(" ", "").replace(",", ".")
+                        if "PF" in c_limpo and estado_busca in c_limpo and "ALC" not in c_limpo:
                             col_estado.append(c)
                     
                     if not col_estado:
-                        st.error(f"Não foi possível localizar a coluna '{estado_destino}' na tabela CMED.")
+                        st.error(f"Erro Crítico: Não foi possível localizar a coluna de Estado '{estado_destino}' na tabela da CMED.")
                         st.stop()
                     c_estado_cmed = col_estado[0]
 
-                    # LEITURA DA PROPOSTA
                     df_raw = ler_proposta_robusto(uploaded_file)
                     if df_raw is None:
-                        st.error("Erro na leitura do ficheiro.")
+                        st.error("Erro na leitura do ficheiro da proposta.")
                         st.stop()
                     
                     linha_cab = 0
@@ -142,7 +147,6 @@ else:
                     c_reg = find_col(['REG', 'M.S', 'MS'], 6)
                     c_vlr = find_col(['VLR', 'UNIT', 'PREÇO'], 9)
 
-                    # CRUZAMENTO MATEMÁTICO
                     df_prop['REG_L'] = df_prop[c_reg].astype(str).str.replace(r'[^0-9]', '', regex=True)
                     df_cmed['REG_C'] = df_cmed[c_reg_cmed].astype(str).str.replace(r'[^0-9]', '', regex=True)
                     
@@ -155,7 +159,6 @@ else:
                     
                     df_erros = df_m[df_m['V_UNIT_N'] > (df_m['TETO_U'] + 0.0001)].copy()
 
-                    # GERAÇÃO DO PDF PROFISSIONAL
                     pdf = FPDF(orientation='L', unit='mm', format='A4')
                     pdf.add_page()
                     if os.path.exists("logo_drogafonte.png"): pdf.image("logo_drogafonte.png", 10, 8, 40); pdf.ln(15)
@@ -196,4 +199,4 @@ else:
                 except Exception as e:
                     st.error(f"Erro de Auditoria: {e}")
 
-st.caption("Drogafonte - v3.0 | Adaptação Total (Fundação Paraibana / CMED)")
+st.caption("Drogafonte - v3.1 | Reconhecimento Imbatível da CMED")
