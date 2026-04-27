@@ -8,21 +8,21 @@ from fpdf import FPDF
 # 1. CONFIGURAÇÃO DA PÁGINA
 st.set_page_config(page_title="Auditoria Drogafonte", page_icon="💊", layout="centered")
 
-# --- NOVO: FUNÇÃO COM CACHE PARA VELOCIDADE MÁXIMA ---
+# --- CACHE PARA VELOCIDADE MÁXIMA ---
 @st.cache_data(show_spinner=False)
 def carregar_base_cmed(caminho):
     try:
-        df = pd.read_excel(caminho)
+        # Lê primeiro sem cabeçalho para varrer as linhas iniciais (A CMED tem ~41 linhas de texto antes da tabela)
+        df_temp = pd.read_excel(caminho, header=None)
+        linha_cabecalho = 0
+        for i, r in df_temp.iterrows():
+            if any('REGISTRO' in str(v).upper() for v in r):
+                linha_cabecalho = i
+                break
+                
+        # Carrega a tabela final a partir da linha correta
+        df = pd.read_excel(caminho, skiprows=linha_cabecalho)
         df.columns = [str(c).strip().upper() for c in df.columns]
-        
-        # Se não achar o cabeçalho "REGISTRO", varre o ficheiro
-        if not any('REGISTRO' in c for c in df.columns):
-            df_temp = pd.read_excel(caminho, header=None)
-            for i, r in df_temp.iterrows():
-                if any('REGISTRO' in str(v).upper() for v in r):
-                    df = pd.read_excel(caminho, skiprows=i)
-                    df.columns = [str(c).strip().upper() for c in df.columns]
-                    break
         return df
     except Exception as e:
         return None
@@ -40,33 +40,27 @@ st.sidebar.header("⚙️ Configurações")
 if os.path.exists("logo_drogafonte.png"):
     st.sidebar.image("logo_drogafonte.png", use_container_width=True)
 
-# Removidos os espaços antes do "%" para maior compatibilidade com a CMED
 estado_destino = st.sidebar.selectbox(
     "Estado da Licitação:", 
-    ["PF 12%", "PF 17%", "PF 17,5%", "PF 18%", "PF 19%", "PF 20%", "PF 20,5%"], 
+    ["PF 12 %", "PF 17 %", "PF 17,5 %", "PF 18 %", "PF 19 %", "PF 20 %", "PF 20,5 %"], 
     index=6
 ).upper()
 
-# 4. MOTOR DE FRACIONAMENTO BLINDADO (Decimais e Seringas)
+# 4. MOTOR DE FRACIONAMENTO BLINDADO (v3.0)
 def extrair_qtd_cmed(apres):
     texto = str(apres).upper().strip()
     if texto == 'NAN' or not texto: return 1
     
     termos_coletivos = ['CX', 'CAR', 'CT', 'ML', 'AMP', 'FA', 'FR', 'SER', 'BOLS', 'CART']
-    if not any(termo in texto for termo in termos_coletivos):
-        return 1
-    
+    if not any(termo in texto for termo in termos_coletivos): return 1
     if "DOS" in texto: return 1
     
-    # Busca flexível de recipientes (SER, SERG, SERINGA, etc)
     m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|BOLS|CARP|TUB|BOMBA|CANETA|SVD)[A-Z]*\b', texto)
     if m: return int(m.group(1))
-    
-    # Múltiplos com escudo decimal (ex: 50 BL X 10)
+
     m = re.search(r'\b(\d+)\s+(?:BL|ENV|STRIP).*?X\s+(\d+)\b(?!\s*[,.]|\s*(?:ML|MG|G|MCG|UI))', texto)
     if m: return int(m.group(1)) * int(m.group(2))
     
-    # Multiplicador final com escudo decimal (Ignora volumes como X 0,6 ML)
     m = re.search(r'X\s+(\d+)\b(?!\s*[,.]|\s*(?:ML|MG|G|MCG|UI|U\.I\.))', texto)
     if m: return int(m.group(1))
     
@@ -96,19 +90,31 @@ else:
                 try:
                     df_cmed = df_cmed_base.copy()
                     
-                    # PROTEÇÃO CMED: Evita o erro 'REGISTRO', 'APRESENTA' e 'PF'
+                    # CAPTURA INTELIGENTE DE COLUNAS DA CMED
                     lista_apres = [c for c in df_cmed.columns if 'APRESENTA' in c]
                     c_apres_cmed = lista_apres[0] if lista_apres else df_cmed.columns[10]
                     
                     lista_reg = [c for c in df_cmed.columns if 'REGISTRO' in c]
                     c_reg_cmed = lista_reg[0] if lista_reg else df_cmed.columns[0]
 
-                    # BUSCA INTELIGENTE DO ESTADO (Resolve o erro "PF 20,5 % not in index")
+                    # BUSCA DE ESTADO (Ignora espaços e garante que pega a coluna exata do Estado)
                     estado_limpo = estado_destino.replace(" ", "").replace(",", ".")
-                    col_estado = [c for c in df_cmed.columns if estado_limpo in str(c).replace(" ", "").replace(",", ".")]
-                    c_estado_cmed = col_estado[0] if col_estado else estado_destino
+                    col_estado = []
+                    for c in df_cmed.columns:
+                        c_limpo = str(c).replace(" ", "").replace(",", ".")
+                        if estado_limpo in c_limpo and 'ALC' not in c_limpo:
+                            col_estado.append(c)
+                    
+                    if not col_estado:
+                        st.error(f"Não foi possível localizar a coluna '{estado_destino}' na tabela CMED.")
+                        st.stop()
+                    c_estado_cmed = col_estado[0]
 
+                    # LEITURA DA PROPOSTA
                     df_raw = ler_proposta_robusto(uploaded_file)
+                    if df_raw is None:
+                        st.error("Erro na leitura do ficheiro.")
+                        st.stop()
                     
                     linha_cab = 0
                     achou = False
@@ -127,7 +133,6 @@ else:
                     df_prop = df_raw.iloc[linha_cab+1:].copy()
                     df_prop.columns = [str(c).strip().upper() for c in df_raw.iloc[linha_cab].tolist()]
 
-                    # PROTEÇÃO PROPOSTA: Evita 'list index out of range'
                     def find_col(nomes, idx):
                         for c in df_prop.columns:
                             if any(n in str(c) for n in nomes): return c
@@ -137,7 +142,7 @@ else:
                     c_reg = find_col(['REG', 'M.S', 'MS'], 6)
                     c_vlr = find_col(['VLR', 'UNIT', 'PREÇO'], 9)
 
-                    # Cruzamento
+                    # CRUZAMENTO MATEMÁTICO
                     df_prop['REG_L'] = df_prop[c_reg].astype(str).str.replace(r'[^0-9]', '', regex=True)
                     df_cmed['REG_C'] = df_cmed[c_reg_cmed].astype(str).str.replace(r'[^0-9]', '', regex=True)
                     
@@ -150,7 +155,7 @@ else:
                     
                     df_erros = df_m[df_m['V_UNIT_N'] > (df_m['TETO_U'] + 0.0001)].copy()
 
-                    # PDF
+                    # GERAÇÃO DO PDF PROFISSIONAL
                     pdf = FPDF(orientation='L', unit='mm', format='A4')
                     pdf.add_page()
                     if os.path.exists("logo_drogafonte.png"): pdf.image("logo_drogafonte.png", 10, 8, 40); pdf.ln(15)
@@ -191,4 +196,4 @@ else:
                 except Exception as e:
                     st.error(f"Erro de Auditoria: {e}")
 
-st.caption("Drogafonte - v2.9 | Layout Original e Motor Protegido")
+st.caption("Drogafonte - v3.0 | Adaptação Total (Fundação Paraibana / CMED)")
