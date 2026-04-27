@@ -5,14 +5,13 @@ import io
 import os
 from fpdf import FPDF
 
-# 1. CONFIGURAÇÃO DA PÁGINA (Wide para melhor visualização das tabelas)
+# 1. CONFIGURAÇÃO DA PÁGINA
 st.set_page_config(page_title="Auditoria Drogafonte", page_icon="💊", layout="wide")
 
 # --- CACHE: LEITURA BLINDADA DA CMED ---
 @st.cache_data(show_spinner=False)
 def carregar_base_cmed(caminho):
     try:
-        # Pula os avisos da Anvisa e encontra o cabeçalho real
         df_temp = pd.read_excel(caminho, header=None)
         linha_cabecalho = 0
         for i, r in df_temp.head(100).iterrows():
@@ -34,7 +33,7 @@ with col1:
         st.image("logo_drogafonte.png", width=200)
 with col2:
     st.title("Portal de Auditoria - Drogafonte")
-    st.markdown("Valide propostas, emita o PDF oficial e exporte as análises instantaneamente.")
+    st.markdown("Valide propostas, emita o PDF oficial com logo e exporte as análises instantaneamente.")
 st.divider()
 
 # 3. CONFIGURAÇÕES LATERAIS
@@ -78,7 +77,6 @@ def ler_proposta_robusto(file_buffer):
         except:
             return None
 
-# Função para exportar CSV compatível com Excel Português
 def converter_para_csv(df):
     return df.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
 
@@ -102,7 +100,7 @@ else:
                     lista_reg = [c for c in df_cmed.columns if 'REGISTRO' in c]
                     c_reg_cmed = lista_reg[0] if lista_reg else df_cmed.columns[0]
 
-                    # FILTRO ANTI-ASTERISCO PARA A COLUNA DO ESTADO
+                    # FILTRO ANTI-ASTERISCO DO ESTADO
                     estado_num = estado_destino.replace("PF", "").replace("%", "").replace(" ", "").replace(",", ".")
                     estado_busca = f"{estado_num}%"
                     
@@ -117,7 +115,7 @@ else:
                         st.stop()
                     c_estado_cmed = col_estado[0]
 
-                    # LIMPEZA DOS VALORES DA CMED (Remove asteriscos diretamente dos números da tabela)
+                    # LIMPEZA DOS VALORES DA CMED
                     df_cmed[c_estado_cmed] = df_cmed[c_estado_cmed].astype(str).str.replace(r'[^0-9,.]', '', regex=True)
 
                     df_raw = ler_proposta_robusto(uploaded_file)
@@ -147,9 +145,19 @@ else:
                             if any(n in str(c) for n in nomes): return c
                         return df_prop.columns[idx] if idx < len(df_prop.columns) else df_prop.columns[-1]
 
+                    c_item = find_col(['ITEM'], 0)
                     c_desc = find_col(['DISC', 'DESC', 'NOME', 'PROD'], 2)
                     c_reg = find_col(['REG', 'M.S', 'MS'], 6)
+                    c_marca = find_col(['MARCA', 'FABR'], 7)
                     c_vlr = find_col(['VLR', 'UNIT', 'PREÇO'], 9)
+
+                    # JUNÇÃO: DESCRIÇÃO + MARCA/FABRICANTE
+                    df_prop['DESC_COMPLETA'] = df_prop.apply(
+                        lambda r: f"{str(r[c_desc]).strip()} - Fab: {str(r[c_marca]).strip()}" 
+                        if c_marca in df_prop.columns and str(r[c_marca]).strip().lower() != 'nan' 
+                        else str(r[c_desc]).strip(), 
+                        axis=1
+                    )
 
                     # CRUZAMENTO
                     df_prop['REG_L'] = df_prop[c_reg].astype(str).str.replace(r'[^0-9]', '', regex=True)
@@ -165,18 +173,22 @@ else:
                     df_m['DIFERENCA'] = df_m['V_UNIT_N'] - df_m['TETO_U']
                     
                     df_erros = df_m[df_m['V_UNIT_N'] > (df_m['TETO_U'] + 0.0001)].copy()
-                    df_alertas = df_m[df_m['REG_C'].isna()].copy() # Registos que não cruzaram
+                    df_alertas = df_m[df_m['REG_C'].isna()].copy() # Produtos não encontrados
 
-                    # GERADOR DE PDF
+                    # ---------------- GERADOR DE PDF ----------------
                     pdf = FPDF(orientation='L', unit='mm', format='A4')
+                    
+                    # PÁGINA 1: DIVERGÊNCIAS ACIMA DO TETO
                     pdf.add_page()
-                    if os.path.exists("logo_drogafonte.png"): pdf.image("logo_drogafonte.png", 10, 8, 40); pdf.ln(15)
+                    # Logo no Canto Superior Direito
+                    if os.path.exists("logo_drogafonte.png"): 
+                        pdf.image("logo_drogafonte.png", 245, 8, 40)
 
                     pdf.set_font("Arial", 'B', 9)
-                    for l in cab_pdf[:4]: pdf.cell(0, 5, l, ln=True)
+                    for l in cab_pdf[:5]: pdf.cell(0, 5, l, ln=True)
                     pdf.ln(5); pdf.set_draw_color(180); pdf.line(10, pdf.get_y(), 287, pdf.get_y()); pdf.ln(5)
                     pdf.set_font("Arial", 'B', 14); pdf.set_text_color(200, 0, 0)
-                    pdf.cell(0, 10, f"RELATÓRIO DE DIVERGÊNCIAS CMED - {estado_destino}", ln=True, align='C')
+                    pdf.cell(0, 10, f"DIVERGÊNCIAS DE PREÇO - {estado_destino}", ln=True, align='C')
                     pdf.ln(5)
 
                     if df_erros.empty:
@@ -184,35 +196,70 @@ else:
                         pdf.cell(0, 30, "✅ PROPOSTA 100% OK. NENHUM ITEM ACIMA DO TETO.", ln=True, align='C')
                     else:
                         pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(240)
-                        pdf.cell(12, 8, "Item", 1, 0, 'C', True)
-                        pdf.cell(128, 8, "Descrição", 1, 0, 'C', True)
-                        pdf.cell(34, 8, "Sua Proposta", 1, 0, 'C', True)
-                        pdf.cell(34, 8, "Teto CMED", 1, 0, 'C', True)
-                        pdf.cell(34, 8, "Diferença", 1, 1, 'C', True)
+                        # Colunas baseadas no layout solicitado
+                        pdf.cell(10, 8, "Item", 1, 0, 'C', True)
+                        pdf.cell(145, 8, "Descricao", 1, 0, 'C', True)
+                        pdf.cell(20, 8, "Proposta", 1, 0, 'C', True)
+                        pdf.cell(25, 8, "PF CMED", 1, 0, 'C', True)
+                        pdf.cell(15, 8, "Div.", 1, 0, 'C', True)
+                        pdf.cell(25, 8, "Teto", 1, 0, 'C', True)
+                        pdf.cell(25, 8, "Dif.", 1, 1, 'C', True)
                         pdf.set_font("Arial", '', 8)
+                        
                         for _, r in df_erros.iterrows():
-                            pdf.cell(12, 7, str(r.get('ITEM', '-')), 1, 0, 'C')
-                            pdf.cell(128, 7, str(r[c_desc])[:80], 1)
-                            pdf.cell(34, 7, f"R$ {r['V_UNIT_N']:.4f}", 1, 0, 'C')
-                            pdf.cell(34, 7, f"R$ {r['TETO_U']:.4f}", 1, 0, 'C')
+                            item_num = str(r.get(c_item, str(r.get('ITEM', '-'))))
+                            item_num = item_num if item_num != 'nan' else '-'
+                            
+                            pdf.cell(10, 7, item_num[:5], 1, 0, 'C')
+                            pdf.cell(145, 7, str(r['DESC_COMPLETA'])[:95], 1)
+                            pdf.cell(20, 7, f"R$ {r['V_UNIT_N']:.4f}", 1, 0, 'C')
+                            pdf.cell(25, 7, f"R$ {r['PF_NUM']:.2f}", 1, 0, 'C')
+                            pdf.cell(15, 7, str(r['QTD_C']), 1, 0, 'C')
+                            pdf.cell(25, 7, f"R$ {r['TETO_U']:.4f}", 1, 0, 'C')
                             pdf.set_text_color(200, 0, 0)
-                            pdf.cell(34, 7, f"R$ {r['DIFERENCA']:.4f}", 1, 1, 'C')
+                            pdf.cell(25, 7, f"R$ {r['DIFERENCA']:.4f}", 1, 1, 'C')
                             pdf.set_text_color(0)
+                            
+                    # PÁGINA 2: ALERTAS DE REGISTRO
+                    if not df_alertas.empty:
+                        pdf.add_page()
+                        # Logo no Canto Superior Direito (repetida para página 2)
+                        if os.path.exists("logo_drogafonte.png"): 
+                            pdf.image("logo_drogafonte.png", 245, 8, 40)
+                            
+                        pdf.set_font("Arial", 'B', 14); pdf.set_text_color(200, 100, 0)
+                        pdf.cell(0, 10, "ALERTAS DE REGISTRO / PRODUTOS NÃO ENCONTRADOS", ln=True, align='C')
+                        pdf.ln(5)
+                        
+                        pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(240)
+                        pdf.cell(15, 8, "Item", 1, 0, 'C', True)
+                        pdf.cell(200, 8, "Descricao", 1, 0, 'C', True)
+                        pdf.cell(50, 8, "Registro", 1, 1, 'C', True)
+                        pdf.set_font("Arial", '', 8)
+                        
+                        for _, r in df_alertas.iterrows():
+                            item_num = str(r.get(c_item, str(r.get('ITEM', '-'))))
+                            item_num = item_num if item_num != 'nan' else '-'
+                            reg_str = str(r.get(c_reg, '-'))
+                            
+                            pdf.cell(15, 7, item_num[:5], 1, 0, 'C')
+                            pdf.cell(200, 7, str(r['DESC_COMPLETA'])[:125], 1)
+                            pdf.cell(50, 7, reg_str[:25], 1, 1, 'C')
 
                     pdf_file = "Auditoria_Final.pdf"
                     pdf.output(pdf_file)
                     st.success("✅ Auditoria Concluída com Sucesso!")
 
-                    # DOWNLOAD DO PDF
+                    # BOTOES DE PDF
                     with open(pdf_file, "rb") as f:
                         st.download_button("📩 Baixar Relatório Oficial (PDF)", f, file_name=pdf_file, mime="application/pdf", type="primary")
 
                     st.markdown("---")
                     st.subheader("🖥️ Pré-visualização e Exportação de Planilhas")
 
-                    colunas_exibicao = [c_desc, c_reg, 'V_UNIT_N', 'TETO_U', 'DIFERENCA', 'QTD_C']
+                    # Uso da nova DESC_COMPLETA para o Excel também
+                    colunas_exibicao = ['DESC_COMPLETA', c_reg, 'V_UNIT_N', 'TETO_U', 'DIFERENCA', 'QTD_C']
                     
-                    # AS ABAS INTERATIVAS RETORNAM
                     tab1, tab2, tab3 = st.tabs(["🚨 Acima do Teto", "⚠️ Alertas (Registos não encontrados)", "📊 Análise Completa"])
                     
                     with tab1:
@@ -220,8 +267,8 @@ else:
                         st.download_button("📥 Descarregar Acima do Teto (Excel)", converter_para_csv(df_erros), "Divergencias.csv", "text/csv")
                         
                     with tab2:
-                        st.info("Estes itens não foram encontrados na tabela da CMED. Verifique se o registo na sua proposta está correto ou se o produto foi descontinuado.")
-                        st.dataframe(df_alertas[[c_desc, c_reg, 'V_UNIT_N']], use_container_width=True)
+                        st.info("Estes itens não foram encontrados na tabela da CMED. Verifique se o registo na sua proposta está correto.")
+                        st.dataframe(df_alertas[['DESC_COMPLETA', c_reg, 'V_UNIT_N']], use_container_width=True)
                         st.download_button("📥 Descarregar Alertas (Excel)", converter_para_csv(df_alertas), "Alertas.csv", "text/csv")
                         
                     with tab3:
@@ -231,4 +278,4 @@ else:
                 except Exception as e:
                     st.error(f"Erro de Auditoria: {e}")
 
-st.caption("Drogafonte - v4.1 | PDF Oficial + Dashboards Interativos + Anti-Asterisco")
+st.caption("Drogafonte - v5.0 | PDF Oficial Atualizado + Painéis Excel")
