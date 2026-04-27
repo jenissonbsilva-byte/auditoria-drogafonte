@@ -5,6 +5,7 @@ import io
 import re
 import os
 import base64
+import urllib.request
 
 # Configuração da Página
 st.set_page_config(page_title="Auditoria Drogafonte - CMED", layout="wide", page_icon="🛡️")
@@ -32,8 +33,20 @@ def get_image_base64(path):
     except:
         return None
 
+def obter_logo_local():
+    """Baixa a logo temporariamente para garantir que o FPDF consiga renderizar no PDF"""
+    if os.path.exists("logo_temp.png"):
+        return "logo_temp.png"
+    try:
+        req = urllib.request.Request("https://drogafonte.com.br/wp-content/uploads/2021/10/logo-drogafonte.png", headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response:
+            with open("logo_temp.png", "wb") as f:
+                f.write(response.read())
+        return "logo_temp.png"
+    except:
+        return None
+
 def limpar_registro(reg):
-    """Garante que o registro seja lido corretamente com 13 dígitos"""
     if pd.isna(reg) or str(reg).strip().upper() in ['NAN', 'NONE', '']: 
         return ""
     if isinstance(reg, (float, int)):
@@ -44,7 +57,6 @@ def limpar_registro(reg):
     return re.sub(r'[^0-9]', '', s)
 
 def formatar_moeda(val):
-    """Lida com valores financeiros, removendo R$, asteriscos e caracteres especiais"""
     if pd.isna(val) or str(val).strip() == '': 
         return 0.0
     v = str(val)
@@ -121,18 +133,15 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
                 linha_cab = i
                 break
         
-        # Guarda o cabeçalho
         cabecalho_info = [" ".join(df_raw.iloc[j].dropna().astype(str).tolist()) for j in range(linha_cab) if str(df_raw.iloc[j].dropna()).strip()]
         df_prop = df_raw.iloc[linha_cab+1:].copy()
         df_prop.columns = df_raw.iloc[linha_cab].astype(str).str.strip()
         
-        # Identificação de colunas dinâmicas
         c_desc = [c for c in df_prop.columns if any(x in str(c) for x in ['D i s c', 'Nome Com', 'Descrição'])][0]
         c_reg = [c for c in df_prop.columns if 'REG.M.S' in str(c).upper().replace(' ', '') or 'REGISTRO' in str(c).upper()][0]
         c_vlr = [c for c in df_prop.columns if 'VLR' in str(c).upper() and 'UNIT' in str(c).upper()][0]
         c_item = [c for c in df_prop.columns if 'ITEM' in str(c).upper()][0]
         
-        # Tenta achar Marca/Fabricante (se não tiver, não quebra)
         col_marca_busca = [c for c in df_prop.columns if any(x in str(c).upper() for x in ['MARCA', 'FABRICANTE'])]
         c_marca = col_marca_busca[0] if col_marca_busca else None
 
@@ -149,20 +158,15 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         df_m['Teto_U'] = df_m['PF_Num'] / df_m['Divisor']
         df_m['Diferenca'] = df_m['V_Unit'] - df_m['Teto_U']
 
-        # Prepara a tabela completa
         df_m['Col_Item'] = df_m[c_item]
         df_m['Col_Desc'] = df_m[c_desc]
         df_m['Col_Reg'] = df_m[c_reg]
         df_m['Col_Marca'] = df_m[c_marca] if c_marca else "-"
         df_m['Status'] = df_m.apply(lambda x: '🔴 Acima do Teto' if x['Diferenca'] > 0.0005 else '🟢 Dentro do Teto', axis=1)
 
-        # Filtra linhas completamente vazias
         df_valido = df_m[df_m['Col_Desc'].notna() & (df_m['Col_Desc'].astype(str).str.strip() != '')].copy()
-
-        # Preços acima do teto
         df_precos = df_valido[(df_valido['Diferenca'] > 0.0005) & (df_valido['Teto_U'] > 0)].copy()
 
-        # Condição de Alertas de Registro
         cond_alerta = (
             df_valido['Col_Reg'].astype(str).str.upper().str.contains(r'NOTIFICADO|RDC', na=False) |
             (df_valido['Reg_L'].str.len() != 13) |
@@ -252,10 +256,12 @@ else:
             if not df_p.empty:
                 pdf.add_page()
                 
-                # Inserção da Logomarca (Canto Superior Direito)
-                try:
-                    pdf.image("https://drogafonte.com.br/wp-content/uploads/2021/10/logo-drogafonte.png", x=245, y=8, w=35)
-                except: pass
+                # Inserção da Logomarca (GARANTIDA) no Canto Superior Direito (x=245)
+                logo_path = obter_logo_local()
+                if logo_path:
+                    try:
+                        pdf.image(logo_path, x=245, y=8, w=35)
+                    except: pass
                 
                 # Título Oficial
                 pdf.set_font("Arial", 'B', 14)
@@ -290,15 +296,23 @@ else:
                 pdf.cell(22, 8, "Teto", 1, 0, 'C', True)
                 pdf.cell(22, 8, "Dif.", 1, 1, 'C', True)
                 
-                pdf.set_font("Arial", '', 7)
+                # Impressão das Linhas
                 for _, row in df_p.iterrows():
+                    pdf.set_font("Arial", '', 7) # Fonte normal para a linha
+                    
                     pdf.cell(12, 6, str(row['Col_Item']), 1, 0, 'C')
                     pdf.cell(90, 6, str(row['Col_Desc'])[:65].encode('latin-1', 'replace').decode('latin-1'), 1)
                     pdf.cell(45, 6, str(row['Col_Marca'])[:25].encode('latin-1', 'replace').decode('latin-1'), 1)
                     pdf.cell(22, 6, f"{row['V_Unit']:.4f}", 1, 0, 'C')
                     pdf.cell(22, 6, f"{row['PF_Num']:.4f}", 1, 0, 'C')
                     pdf.cell(12, 6, str(int(row['Divisor'])), 1, 0, 'C')
+                    
+                    # TETO EM DESTAQUE: Negrito e um pouco maior
+                    pdf.set_font("Arial", 'B', 8.5)
                     pdf.cell(22, 6, f"{row['Teto_U']:.4f}", 1, 0, 'C')
+                    
+                    # Volta para normal para a Diferença
+                    pdf.set_font("Arial", '', 7)
                     pdf.cell(22, 6, f"{row['Diferenca']:.4f}", 1, 1, 'C')
 
             # --- PÁGINA 2: ALERTAS ---
@@ -306,9 +320,10 @@ else:
                 pdf.add_page()
                 
                 # Inserção da Logomarca (Canto Superior Direito)
-                try:
-                    pdf.image("https://drogafonte.com.br/wp-content/uploads/2021/10/logo-drogafonte.png", x=245, y=8, w=35)
-                except: pass
+                if logo_path:
+                    try:
+                        pdf.image(logo_path, x=245, y=8, w=35)
+                    except: pass
                 
                 pdf.set_font("Arial", 'B', 10); pdf.set_text_color(180, 0, 0)
                 pdf.cell(0, 10, "2. ALERTAS DE REGISTRO / PRODUTOS NOTIFICADOS", ln=True)
@@ -322,9 +337,4 @@ else:
                 
                 pdf.set_font("Arial", '', 7)
                 for _, row in df_r.iterrows():
-                    pdf.cell(15, 6, str(row['Col_Item']), 1, 0, 'C')
-                    pdf.cell(130, 6, str(row['Col_Desc'])[:95].encode('latin-1', 'replace').decode('latin-1'), 1)
-                    pdf.cell(55, 6, str(row['Col_Marca'])[:35].encode('latin-1', 'replace').decode('latin-1'), 1)
-                    pdf.cell(45, 6, str(row['Col_Reg']), 1, 1, 'C')
-
-            st.download_button("💾 Baixar PDF do Relatório", pdf.output(dest='S').encode('latin-1'), "Relatorio_Auditoria.pdf", "application/pdf")
+                    pdf.cell(15, 6, str(row['Col_Item']), 1, 0
