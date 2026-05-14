@@ -34,7 +34,14 @@ def get_image_base64(path):
         return None
 
 def obter_logo_local():
-    """Baixa a logo temporariamente para garantir que o PDF consiga exibi-la sem bloqueio de rede"""
+    """Busca a logo no GitHub. Se não achar, baixa temporariamente para não quebrar o PDF"""
+    # 1. Procura primeiro no seu GitHub (Pasta do projeto)
+    if os.path.exists("logo_drogafonte.png"):
+        return "logo_drogafonte.png"
+    elif os.path.exists("logo.png"):
+        return "logo.png"
+    
+    # 2. Se não achar, tenta baixar da internet como backup
     if os.path.exists("logo_temp.png"):
         return "logo_temp.png"
     try:
@@ -76,27 +83,34 @@ def resetar_app():
     for key in ['dados_todos', 'dados_finais', 'erros_registro', 'cabecalho_pdf', 'erro', 'aliquota', 'estado_nome']:
         if key in st.session_state: del st.session_state[key]
 
-# --- MOTOR LÓGICO DE QUANTIDADES ---
+# --- MOTOR LÓGICO DE QUANTIDADES (ATUALIZADO) ---
 def extrair_qtd_cmed(apres_cmed, desc_proposta):
     apres = str(apres_cmed).upper()
     desc = str(desc_proposta).upper()
     
+    # 1. Blindagem Total para Doses/Sprays
     padrao_dose = r'\b(DOSES?|AEROSSOL|AEROSOL|AER\b|SPRAY|JATOS?|ACIONAMENTOS?|INALADOR|PULVERIZA[A-Z]*)\b'
     if re.search(padrao_dose, apres) or re.search(padrao_dose, desc):
         return 1
     
-    unidades_ignoradas = r'(?:ML|MG|G|MCG|UI|%|L|KG|GOTAS|MM|CM)'
+    # 2. O DESTRUIDOR DE MEDIDAS FRACIONADAS (Resolve o problema do Bimatoprosta e Enoxaparina)
+    # Remove qualquer número (incluindo decimais como 0,4) que esteja grudado com ML, MG, G, UI, etc.
+    apres_clean = re.sub(r'\b\d+(?:[,.]\d+)?\s*(?:ML|MG|G|MCG|UI|%|L|KG|GOTAS|MM|CM)\b', '', apres)
     
-    m = re.search(rf'\b(\d+)\s+(?:BL|ENV|STRIP|CPR|CAP|AMP|FA|FR|SER|TB|BS|CJ|SVD).*?X\s+(\d+)\b(?!\s*[,.]\s*\d+)(?!\s*{unidades_ignoradas})', apres)
+    # 3. Busca padrões de multiplicação (ex: 3 BL X 10) usando o texto limpo
+    m = re.search(r'\b(\d+)\s+(?:BL|ENV|STRIP|CPR|CAP|AMP|FA|FR|SER|TB|BS|CJ|SVD).*?X\s+(\d+)\b', apres_clean)
     if m: return float(m.group(1)) * float(m.group(2))
     
-    m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|TB|BS|CJ|BOLS|CARP|TUB|BOMBA|CANETA|SVD|CX|CT|BL|ENV|STRIP|CPR|COMP?|CPRS|CAP|UN)\b', apres)
+    # 4. Busca quantidades isoladas de recipientes (Ex: 2 SER PREENCHIDAS)
+    m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|TB|BS|CJ|BOLS|CARP|TUB|BOMBA|CANETA|SVD|CX|CT|BL|ENV|STRIP|CPR|COMP?|CPRS|CAP|UN)\b', apres_clean)
     if m: return float(m.group(1))
     
-    m = re.search(rf'X\s+(\d+)\b(?!\s*[,.]\s*\d+)(?!\s*{unidades_ignoradas})', apres)
+    # 5. Busca padrão "X Quantidade" (Ex: X 500)
+    m = re.search(r'X\s+(\d+)\b', apres_clean)
     if m: return float(m.group(1))
     
-    m = re.search(r'(?:C/|CT|CX|COM|CONTEM)\s*(\d+)\b', apres)
+    # 6. Busca padrão "C/ Quantidade"
+    m = re.search(r'(?:C/|CT|CX|COM|CONTEM)\s*(\d+)\b', apres_clean)
     if m: return float(m.group(1))
     
     return 1
@@ -181,7 +195,7 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
 # --- INTERFACE ---
 df_cmed = carregar_cmed()
 with st.sidebar:
-    logo_b64 = get_image_base64("logo.png") or get_image_base64("logo_drogafonte.png")
+    logo_b64 = get_image_base64("logo_drogafonte.png") or get_image_base64("logo.png")
     if logo_b64:
         st.markdown(f'<img src="data:image/png;base64,{logo_b64}" width="200">', unsafe_allow_html=True)
     else:
@@ -252,12 +266,14 @@ else:
         if st.button("📄 Gerar Relatório PDF Final", type="primary", use_container_width=True):
             pdf = FPDF(orientation='L', unit='mm', format='A4')
             
+            # --- LOCALIZA A LOGO NO GITHUB OU BAIXA ---
+            logo_path = obter_logo_local()
+            
             # --- PÁGINA 1: DIVERGÊNCIAS ---
             if not df_p.empty:
                 pdf.add_page()
                 
                 # Inserção da Logomarca no Canto Superior Direito
-                logo_path = obter_logo_local()
                 if logo_path:
                     try:
                         pdf.image(logo_path, x=245, y=8, w=35)
@@ -298,7 +314,7 @@ else:
                 
                 # Impressão das Linhas (COM DESTAQUE NO TETO)
                 for _, row in df_p.iterrows():
-                    pdf.set_font("Arial", '', 7) # Fonte normal para a linha
+                    pdf.set_font("Arial", '', 7) 
                     
                     pdf.cell(12, 6, str(row['Col_Item']), 1, 0, 'C')
                     pdf.cell(90, 6, str(row['Col_Desc'])[:65].encode('latin-1', 'replace').decode('latin-1'), 1)
