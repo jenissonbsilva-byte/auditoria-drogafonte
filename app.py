@@ -35,13 +35,11 @@ def get_image_base64(path):
 
 def obter_logo_local():
     """Busca a logo no GitHub. Se não achar, baixa temporariamente para não quebrar o PDF"""
-    # 1. Procura primeiro no seu GitHub (Pasta do projeto)
     if os.path.exists("logo_drogafonte.png"):
         return "logo_drogafonte.png"
     elif os.path.exists("logo.png"):
         return "logo.png"
     
-    # 2. Se não achar, tenta baixar da internet como backup
     if os.path.exists("logo_temp.png"):
         return "logo_temp.png"
     try:
@@ -83,7 +81,7 @@ def resetar_app():
     for key in ['dados_todos', 'dados_finais', 'erros_registro', 'cabecalho_pdf', 'erro', 'aliquota', 'estado_nome']:
         if key in st.session_state: del st.session_state[key]
 
-# --- MOTOR LÓGICO DE QUANTIDADES (ATUALIZADO) ---
+# --- MOTOR LÓGICO DE QUANTIDADES (ATUALIZADO E BLINDADO) ---
 def extrair_qtd_cmed(apres_cmed, desc_proposta):
     apres = str(apres_cmed).upper()
     desc = str(desc_proposta).upper()
@@ -93,19 +91,18 @@ def extrair_qtd_cmed(apres_cmed, desc_proposta):
     if re.search(padrao_dose, apres) or re.search(padrao_dose, desc):
         return 1
     
-    # 2. O DESTRUIDOR DE MEDIDAS FRACIONADAS (Resolve o problema do Bimatoprosta e Enoxaparina)
-    # Remove qualquer número (incluindo decimais como 0,4) que esteja grudado com ML, MG, G, UI, etc.
+    # 2. O DESTRUIDOR DE MEDIDAS FRACIONADAS
     apres_clean = re.sub(r'\b\d+(?:[,.]\d+)?\s*(?:ML|MG|G|MCG|UI|%|L|KG|GOTAS|MM|CM)\b', '', apres)
     
-    # 3. Busca padrões de multiplicação (ex: 3 BL X 10) usando o texto limpo
-    m = re.search(r'\b(\d+)\s+(?:BL|ENV|STRIP|CPR|CAP|AMP|FA|FR|SER|TB|BS|CJ|SVD).*?X\s+(\d+)\b', apres_clean)
+    # 3. Busca padrões de multiplicação (ATUALIZADO com STR, COMP e CPRS)
+    m = re.search(r'\b(\d+)\s+(?:BL|ENV|STRIP|STR|CPR|COMP|CPRS|CAP|AMP|FA|FR|SER|TB|BS|CJ|SVD).*?X\s+(\d+)\b', apres_clean)
     if m: return float(m.group(1)) * float(m.group(2))
     
-    # 4. Busca quantidades isoladas de recipientes (Ex: 2 SER PREENCHIDAS)
-    m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|TB|BS|CJ|BOLS|CARP|TUB|BOMBA|CANETA|SVD|CX|CT|BL|ENV|STRIP|CPR|COMP?|CPRS|CAP|UN)\b', apres_clean)
+    # 4. Busca quantidades isoladas de recipientes
+    m = re.search(r'\b(\d+)\s+(?:AMP|FA|FR|SER|TB|BS|CJ|BOLS|CARP|TUB|BOMBA|CANETA|SVD|CX|CT|BL|ENV|STRIP|STR|CPR|COMP?|CPRS|CAP|UN)\b', apres_clean)
     if m: return float(m.group(1))
     
-    # 5. Busca padrão "X Quantidade" (Ex: X 500)
+    # 5. Busca padrão "X Quantidade"
     m = re.search(r'X\s+(\d+)\b', apres_clean)
     if m: return float(m.group(1))
     
@@ -176,15 +173,30 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         df_m['Col_Desc'] = df_m[c_desc]
         df_m['Col_Reg'] = df_m[c_reg]
         df_m['Col_Marca'] = df_m[c_marca] if c_marca else "-"
-        df_m['Status'] = df_m.apply(lambda x: '🔴 Acima do Teto' if x['Diferenca'] > 0.0005 else '🟢 Dentro do Teto', axis=1)
+
+        # NOVA REGRA PARA BLINDAR ISENTOS E NOTIFICADOS
+        def classificar_status(row):
+            reg = str(row['Col_Reg']).upper()
+            if 'NOTIFICADO' in reg or 'RDC' in reg or pd.isna(row['Reg_C']) or row['PF_Num'] == 0:
+                return '⚠️ Isento/Não Localizado'
+            elif row['Diferenca'] > 0.0005:
+                return '🔴 Acima do Teto'
+            else:
+                return '🟢 Dentro do Teto'
+
+        df_m['Status'] = df_m.apply(classificar_status, axis=1)
 
         df_valido = df_m[df_m['Col_Desc'].notna() & (df_m['Col_Desc'].astype(str).str.strip() != '')].copy()
-        df_precos = df_valido[(df_valido['Diferenca'] > 0.0005) & (df_valido['Teto_U'] > 0)].copy()
+        
+        # Filtra na tabela de divergências APENAS quem tem status de erro matemático (Ignora isentos)
+        df_precos = df_valido[df_valido['Status'] == '🔴 Acima do Teto'].copy()
 
+        # Isentos e não localizados vão DIRETO para a aba de alertas
         cond_alerta = (
             df_valido['Col_Reg'].astype(str).str.upper().str.contains(r'NOTIFICADO|RDC', na=False) |
             (df_valido['Reg_L'].str.len() != 13) |
-            (df_valido['Reg_C'].isna())
+            (df_valido['Reg_C'].isna()) |
+            (df_valido['PF_Num'] == 0)
         )
         df_reg_err = df_valido[cond_alerta].copy()
 
@@ -266,27 +278,23 @@ else:
         if st.button("📄 Gerar Relatório PDF Final", type="primary", use_container_width=True):
             pdf = FPDF(orientation='L', unit='mm', format='A4')
             
-            # --- LOCALIZA A LOGO NO GITHUB OU BAIXA ---
             logo_path = obter_logo_local()
             
             # --- PÁGINA 1: DIVERGÊNCIAS ---
             if not df_p.empty:
                 pdf.add_page()
                 
-                # Inserção da Logomarca no Canto Superior Direito
                 if logo_path:
                     try:
                         pdf.image(logo_path, x=245, y=8, w=35)
                     except: pass
                 
-                # Título Oficial
                 pdf.set_font("Arial", 'B', 14)
                 pdf.cell(0, 8, "RELATÓRIO DE AUDITORIA CMED", ln=True, align='L')
                 pdf.set_font("Arial", '', 9)
                 pdf.cell(0, 5, f"Estado de Destino: {st.session_state.estado_nome} - Aliq: {st.session_state.aliquota}", ln=True, align='L')
                 pdf.ln(4)
                 
-                # Bloco de Identificação (Cabeçalho da Proposta)
                 pdf.set_fill_color(245, 245, 245)
                 pdf.set_font("Arial", 'B', 8)
                 pdf.cell(0, 5, " DADOS DA PROPOSTA:", ln=True, fill=True)
@@ -296,12 +304,10 @@ else:
                         pdf.cell(0, 4, f"  {str(h).encode('latin-1', 'replace').decode('latin-1')}", ln=True)
                 pdf.ln(5)
                 
-                # Subtítulo da Tabela
                 pdf.set_font("Arial", 'B', 10); pdf.set_text_color(180, 0, 0)
                 pdf.cell(0, 6, "1. DIVERGÊNCIAS DE PREÇO ACIMA DO TETO", ln=True)
                 pdf.ln(2)
                 
-                # Cabeçalho da Tabela
                 pdf.set_font("Arial", 'B', 8); pdf.set_text_color(0); pdf.set_fill_color(220, 220, 220)
                 pdf.cell(12, 8, "Item", 1, 0, 'C', True)
                 pdf.cell(90, 8, "Descricao", 1, 0, 'C', True)
@@ -312,7 +318,6 @@ else:
                 pdf.cell(22, 8, "Teto", 1, 0, 'C', True)
                 pdf.cell(22, 8, "Dif.", 1, 1, 'C', True)
                 
-                # Impressão das Linhas (COM DESTAQUE NO TETO)
                 for _, row in df_p.iterrows():
                     pdf.set_font("Arial", '', 7) 
                     
@@ -323,11 +328,9 @@ else:
                     pdf.cell(22, 6, f"{row['PF_Num']:.4f}", 1, 0, 'C')
                     pdf.cell(12, 6, str(int(row['Divisor'])), 1, 0, 'C')
                     
-                    # --- DESTAQUE AQUI: Aumenta o Teto e coloca em Negrito ---
                     pdf.set_font("Arial", 'B', 8.5)
                     pdf.cell(22, 6, f"{row['Teto_U']:.4f}", 1, 0, 'C')
                     
-                    # Volta para normal para imprimir a Diferença
                     pdf.set_font("Arial", '', 7)
                     pdf.cell(22, 6, f"{row['Diferenca']:.4f}", 1, 1, 'C')
 
@@ -335,7 +338,6 @@ else:
             if not df_r.empty:
                 pdf.add_page()
                 
-                # Inserção da Logomarca no Canto Superior Direito (Página 2)
                 if logo_path:
                     try:
                         pdf.image(logo_path, x=245, y=8, w=35)
