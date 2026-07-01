@@ -10,19 +10,18 @@ import urllib.request
 # Configuração da Página
 st.set_page_config(page_title="Auditoria Drogafonte - CMED", layout="wide", page_icon="🛡️")
 
-# --- DICIONÁRIO DE ALÍQUOTAS POR ESTADO ---
+# --- DICIONÁRIO DE ALÍQUOTAS POR ESTADO (ATUALIZADO: Removidas as opções manuais de genéricos) ---
 ESTADOS_ICMS = {
     "ACRE (19%)": "PF 19%", "ALAGOAS (19%)": "PF 19%", "AMAPÁ (18%)": "PF 18%",
     "AMAZONAS (20%)": "PF 20%", "BAHIA (20,5%)": "PF 20,5%", "CEARÁ (20%)": "PF 20%",
     "DISTRITO FEDERAL (17%)": "PF 17%", "ESPÍRITO SANTO (17%)": "PF 17%",
     "GOIÁS (19%)": "PF 19%", "MARANHÃO (23%)": "PF 22%", "MATO GROSSO (17%)": "PF 17%",
     "MATO GROSSO DO SUL (17%)": "PF 17%", "MINAS GERAIS (18%)": "PF 18%",
-    "MINAS GERAIS - GENÉRICOS (12%)": "PF 12%", "PARÁ (19%)": "PF 19%",
-    "PARAÍBA (20%)": "PF 20%", "PARANÁ (19,5%)": "PF 19,5%", "PERNAMBUCO (20,5%)": "PF 20,5%",
-    "PIAUÍ (22,5%)": "PF 22%", "RIO DE JANEIRO (22%)": "PF 22%", "RIO GRANDE DO NORTE (20%)": "PF 20%",
-    "RIO GRANDE DO SUL (17%)": "PF 17%", "RONDÔNIA (19,5%)": "PF 19,5%",
-    "RORAIMA (20%)": "PF 20%", "SANTA CATARINA (17%)": "PF 17%", "SÃO PAULO (18%)": "PF 18%",
-    "SÃO PAULO - GENÉRICOS (12%)": "PF 12%", "SERGIPE (19%)": "PF 19%", "TOCANTINS (20%)": "PF 20%"
+    "PARÁ (19%)": "PF 19%", "PARAÍBA (20%)": "PF 20%", "PARANÁ (19,5%)": "PF 19,5%", 
+    "PERNAMBUCO (20,5%)": "PF 20,5%", "PIAUÍ (22,5%)": "PF 22%", "RIO DE JANEIRO (22%)": "PF 22%", 
+    "RIO GRANDE DO NORTE (20%)": "PF 20%", "RIO GRANDE DO SUL (17%)": "PF 17%", 
+    "RONDÔNIA (19,5%)": "PF 19,5%", "RORAIMA (20%)": "PF 20%", "SANTA CATARINA (17%)": "PF 17%", 
+    "SÃO PAULO (18%)": "PF 18%", "SERGIPE (19%)": "PF 19%", "TOCANTINS (20%)": "PF 20%"
 }
 
 # --- FUNÇÕES DE APOIO E LIMPEZA ---
@@ -81,7 +80,7 @@ def resetar_app():
     for key in ['dados_todos', 'dados_finais', 'erros_registro', 'cabecalho_pdf', 'erro', 'aliquota', 'estado_nome']:
         if key in st.session_state: del st.session_state[key]
 
-# --- MOTOR LÓGICO DE QUANTIDADES (ATUALIZADO E BLINDADO) ---
+# --- MOTOR LÓGICO DE QUANTIDADES ---
 def extrair_qtd_cmed(apres_cmed, desc_proposta):
     apres = str(apres_cmed).upper()
     desc = str(desc_proposta).upper()
@@ -94,7 +93,7 @@ def extrair_qtd_cmed(apres_cmed, desc_proposta):
     # 2. O DESTRUIDOR DE MEDIDAS FRACIONADAS
     apres_clean = re.sub(r'\b\d+(?:[,.]\d+)?\s*(?:ML|MG|G|MCG|UI|%|L|KG|GOTAS|MM|CM)\b', '', apres)
     
-    # 3. Busca padrões de multiplicação (ATUALIZADO com STR, COMP e CPRS)
+    # 3. Busca padrões de multiplicação
     m = re.search(r'\b(\d+)\s+(?:BL|ENV|STRIP|STR|CPR|COMP|CPRS|CAP|AMP|FA|FR|SER|TB|BS|CJ|SVD).*?X\s+(\d+)\b', apres_clean)
     if m: return float(m.group(1)) * float(m.group(2))
     
@@ -131,7 +130,8 @@ def carregar_cmed():
                 return df
     return None
 
-def processar_dados(file_proposta, df_cmed, coluna_icms):
+# --- PROCESSAMENTO DOS DADOS (ATUALIZADO: Inclusão do parâmetro estado_nome e cálculo dinâmico) ---
+def processar_dados(file_proposta, df_cmed, coluna_icms, estado_nome):
     try:
         if file_proposta.name.endswith('.xls'):
             df_raw = pd.read_excel(file_proposta, header=None, engine='xlrd')
@@ -158,12 +158,29 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
 
         df_prop['Reg_L'] = df_prop[c_reg].apply(limpar_registro)
         df_cmed['Reg_C'] = df_cmed['REGISTRO'].apply(limpar_registro)
-        
         df_prop['V_Unit'] = df_prop[c_vlr].apply(formatar_moeda)
+        
         c_apres_cmed = [c for c in df_cmed.columns if 'APRESENTA' in str(c).upper()][0]
+        
+        # --- ADAPTAÇÃO: Mapeia a coluna de Tipo de Produto da CMED ---
+        c_tipo_prod = [c for c in df_cmed.columns if 'TIPO DE PRODUTO' in str(c).upper()][0]
 
-        df_m = pd.merge(df_prop, df_cmed[['Reg_C', coluna_icms, c_apres_cmed]], left_on='Reg_L', right_on='Reg_C', how='left')
-        df_m['PF_Num'] = df_m[coluna_icms].apply(formatar_moeda)
+        # Garante a inclusão de 'PF 12%' e da coluna selecionada no merge
+        colunas_cmed_selecionadas = ['Reg_C', c_apres_cmed, c_tipo_prod, coluna_icms]
+        if 'PF 12%' in df_cmed.columns and 'PF 12%' not in colunas_cmed_selecionadas:
+            colunas_cmed_selecionadas.append('PF 12%')
+
+        df_m = pd.merge(df_prop, df_cmed[colunas_cmed_selecionadas], left_on='Reg_L', right_on='Reg_C', how='left')
+        
+        # --- ADAPTAÇÃO: Função interna para definir o Preço Fábrica (PF) de forma dinâmica ---
+        def determinar_pf_item(row):
+            tipo_medicamento = str(row[c_tipo_prod]).upper()
+            # Se for MG ou SP e o medicamento contiver "GENE" ou "GENÉ" no tipo de produto
+            if any(est in estado_nome.upper() for est in ["MINAS GERAIS", "SÃO PAULO"]) and ("GENE" in tipo_medicamento or "GENÉ" in tipo_medicamento):
+                return formatar_moeda(row.get('PF 12%', 0))
+            return formatar_moeda(row.get(coluna_icms, 0))
+
+        df_m['PF_Num'] = df_m.apply(determinar_pf_item, axis=1)
         
         df_m['Divisor'] = df_m.apply(lambda row: extrair_qtd_cmed(row[c_apres_cmed], row[c_desc]), axis=1)
         df_m['Teto_U'] = df_m['PF_Num'] / df_m['Divisor']
@@ -174,7 +191,7 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         df_m['Col_Reg'] = df_m[c_reg]
         df_m['Col_Marca'] = df_m[c_marca] if c_marca else "-"
 
-        # NOVA REGRA PARA BLINDAR ISENTOS E NOTIFICADOS
+        # REGRA PARA BLINDAR ISENTOS E NOTIFICADOS
         def classificar_status(row):
             reg = str(row['Col_Reg']).upper()
             if 'NOTIFICADO' in reg or 'RDC' in reg or pd.isna(row['Reg_C']) or row['PF_Num'] == 0:
@@ -187,11 +204,8 @@ def processar_dados(file_proposta, df_cmed, coluna_icms):
         df_m['Status'] = df_m.apply(classificar_status, axis=1)
 
         df_valido = df_m[df_m['Col_Desc'].notna() & (df_m['Col_Desc'].astype(str).str.strip() != '')].copy()
-        
-        # Filtra na tabela de divergências APENAS quem tem status de erro matemático (Ignora isentos)
         df_precos = df_valido[df_valido['Status'] == '🔴 Acima do Teto'].copy()
 
-        # Isentos e não localizados vão DIRETO para a aba de alertas
         cond_alerta = (
             df_valido['Col_Reg'].astype(str).str.upper().str.contains(r'NOTIFICADO|RDC', na=False) |
             (df_valido['Reg_L'].str.len() != 13) |
@@ -222,14 +236,19 @@ with st.sidebar:
     estado_selecionado = st.selectbox("Estado de Destino:", lista_estados, index=indice_pe)
     aliquota = ESTADOS_ICMS[estado_selecionado]
     
-    st.caption(f"📍 Mapeado para: **{aliquota}**")
+    # --- ADAPTAÇÃO: Exibe aviso visual se o estado possuir o split de Genéricos ---
+    if any(e in estado_selecionado.upper() for e in ["MINAS GERAIS", "SÃO PAULO"]):
+        st.caption(f"📍 Base: **{aliquota}** (Genéricos calculados automaticamente a **PF 12%**)")
+    else:
+        st.caption(f"📍 Mapeado para: **{aliquota}**")
 
 st.title("🛡️ Validador CMED - Modo Diagnóstico")
 
 if not st.session_state.tela_resultado:
     upload = st.file_uploader("Arraste a Proposta", type=['xls', 'xlsx', 'csv'])
     if upload and st.button("🚀 Iniciar Auditoria", use_container_width=True, type="primary"):
-        t, p, r, c, err = processar_dados(upload, df_cmed, aliquota)
+        # --- ADAPTAÇÃO: Passando o estado_selecionado como novo argumento ---
+        t, p, r, c, err = processar_dados(upload, df_cmed, aliquota, estado_selecionado)
         st.session_state.dados_todos, st.session_state.dados_finais, st.session_state.erros_registro, st.session_state.cabecalho_pdf, st.session_state.erro, st.session_state.aliquota, st.session_state.estado_nome = t, p, r, c, err, aliquota, estado_selecionado
         st.session_state.tela_resultado = True
         st.rerun()
@@ -277,7 +296,6 @@ else:
 
         if st.button("📄 Gerar Relatório PDF Final", type="primary", use_container_width=True):
             pdf = FPDF(orientation='L', unit='mm', format='A4')
-            
             logo_path = obter_logo_local()
             
             # --- PÁGINA 1: DIVERGÊNCIAS ---
@@ -292,7 +310,7 @@ else:
                 pdf.set_font("Arial", 'B', 14)
                 pdf.cell(0, 8, "RELATÓRIO DE AUDITORIA CMED", ln=True, align='L')
                 pdf.set_font("Arial", '', 9)
-                pdf.cell(0, 5, f"Estado de Destino: {st.session_state.estado_nome} - Aliq: {st.session_state.aliquota}", ln=True, align='L')
+                pdf.cell(0, 5, f"Estado de Destino: {st.session_state.estado_nome} - Aliq Base: {st.session_state.aliquota}", ln=True, align='L')
                 pdf.ln(4)
                 
                 pdf.set_fill_color(245, 245, 245)
